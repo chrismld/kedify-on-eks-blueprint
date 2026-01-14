@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      nodeSelector:
+        workload: inference
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        args:
+        - "--model"
+        - "mistralai/Mistral-7B-Instruct-v0.2"
+        - "--max-num-seqs"
+        - "16"
+        - "--tensor-parallel-size"
+        - "1"
+        ports:
+        - name: api
+          containerPort: 8000
+        - name: metrics
+          containerPort: 8080
+        resources:
+          requests:
+            nvidia.com/gpu: 1
+          limits:
+            nvidia.com/gpu: 1
+        env:
+        - name: HUGGINGFACE_HUB_CACHE
+          value: /models
+        volumeMounts:
+        - name: models
+          mountPath: /models
+      volumes:
+      - name: models
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  namespace: default
+spec:
+  ports:
+  - name: api
+    port: 8000
+    targetPort: 8000
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: vllm

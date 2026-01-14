@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+resources:
+- namespace.yaml
+- karpenter/gpu-nodeclass.yaml
+- karpenter/gpu-nodepool.yaml
+# KEDA ScaledObject commented out - uncomment when KEDA is installed
+# - keda/scaledobject.yaml
+- vllm/deployment.yaml
+- api/deployment.yaml
+- frontend/deployment.yaml
+# Ingress removed - not exposing publicly
+# - frontend/ingress.yaml
