@@ -285,7 +285,7 @@ curl http://localhost:8080/metrics | grep vllm
 kubectl logs -f deployment/api
 
 # Verify S3 bucket
-aws s3 ls s3://ai-workloads-tube-demo-questions/
+aws s3 ls s3://{project_name}-questions-{account_id}/
 
 # Load generator will use defaults as fallback
 ```

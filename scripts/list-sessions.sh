@@ -1,9 +1,14 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="eu-west-1"
-AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-BUCKET="ai-workloads-tube-demo-responses-${AWS_ACCOUNT}"
+# Get config from Terraform
+cd terraform
+AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
+AWS_ACCOUNT=$(terraform output -raw aws_account_id 2>/dev/null || aws sts get-caller-identity --query Account --output text)
+PROJECT_NAME=$(terraform output -raw project_name 2>/dev/null || echo "tube-demo")
+cd ..
+
+BUCKET="${PROJECT_NAME}-responses-${AWS_ACCOUNT}"
 
 echo "📋 Available Sessions"
 echo "===================="

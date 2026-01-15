@@ -1,11 +1,23 @@
 #!/bin/bash
 set -e
 
-echo "🔨 Building multi-arch images..."
+echo "🔍 Getting configuration from Terraform..."
+cd terraform
 
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-AWS_REGION="eu-west-1"
+AWS_ACCOUNT_ID=$(terraform output -raw aws_account_id 2>/dev/null || aws sts get-caller-identity --query Account --output text)
+AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
+PROJECT_NAME=$(terraform output -raw project_name 2>/dev/null || echo "tube-demo")
+
+cd ..
+
 REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+echo "📦 Configuration:"
+echo "   Account: ${AWS_ACCOUNT_ID}"
+echo "   Region: ${AWS_REGION}"
+echo "   Project: ${PROJECT_NAME}"
+echo "   Registry: ${REGISTRY}"
+echo ""
 
 # Login to ECR
 aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY
@@ -23,7 +35,7 @@ fi
 echo "📦 Building API..."
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t $REGISTRY/ai-workloads-tube-demo/api:latest \
+  -t $REGISTRY/${PROJECT_NAME}/api:latest \
   --push \
   app/api/
 
@@ -31,8 +43,11 @@ docker buildx build \
 echo "📦 Building Frontend..."
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t $REGISTRY/ai-workloads-tube-demo/frontend:latest \
+  -t $REGISTRY/${PROJECT_NAME}/frontend:latest \
   --push \
   app/frontend/
 
 echo "✅ Images built and pushed!"
+echo ""
+echo "💡 Next step: Update Kubernetes manifests with these image URLs"
+echo "   Run: ./scripts/update-manifests.sh"

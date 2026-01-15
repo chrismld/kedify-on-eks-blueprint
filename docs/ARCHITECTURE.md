@@ -117,7 +117,7 @@ When vLLM pods become Pending (after KEDA scales):
 ## Network & Storage
 
 - **vLLM Model**: In-memory (ephemeral)
-- **Survey Responses**: S3 bucket (`ai-workloads-tube-demo-responses`)
+- **Survey Responses**: S3 bucket (`{project_name}-responses-{account_id}`)
 - **Cluster DNS**: CoreDNS (default)
 - **Ingress**: ALB Ingress Controller (optional)
 

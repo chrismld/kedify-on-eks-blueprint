@@ -86,7 +86,7 @@ resource "kubectl_manifest" "karpenter_default_nodepool" {
           requirements:
           - key: kubernetes.io/arch
             operator: In
-            values: ["amd64"]
+            values: ["amd64","arm64"]
           - key: kubernetes.io/os
             operator: In
             values: ["linux"]

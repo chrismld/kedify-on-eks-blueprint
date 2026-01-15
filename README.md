@@ -23,6 +23,19 @@ This is a **production-grade demo** of:
 - **k6** (load testing, install via `brew install k6` or `go install github.com/grafana/k6@latest`)
 - **jq** for JSON processing
 
+### Configuration
+
+The project uses Terraform variables for configuration. Key settings in `terraform/terraform.tfvars`:
+
+- **region**: AWS region (default: `eu-west-1`)
+- **project_name**: Project identifier used for resource naming (default: `tube-demo`)
+  - ECR repositories: `{project_name}/api`, `{project_name}/frontend`
+  - S3 buckets: `{project_name}-responses-{account_id}`, `{project_name}-questions-{account_id}`
+- **eks_version**: Kubernetes version
+- **karpenter_version**: Karpenter version
+
+All scripts automatically read these values from Terraform outputs, so you only configure once.
+
 ### Setup (30-40 minutes)
 
 ```bash
@@ -30,17 +43,20 @@ This is a **production-grade demo** of:
 git clone https://github.com/christianhxc/kedify-on-eks-blueprint.git
 cd kedify-on-eks-blueprint
 
-# 2. Configure AWS region and ECR (see terraform/terraform.tfvars.example)
+# 2. Configure AWS region and project name
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-# Edit terraform/terraform.tfvars with your region and desired instance diversification
+# Edit terraform/terraform.tfvars:
+#   - region: Your AWS region (default: eu-west-1)
+#   - project_name: Your project name (default: tube-demo)
+#   - eks_version, karpenter_version as needed
 
 # 3. Deploy infrastructure
 make setup-infra
 
 # 4. Configure kubectl to connect to the cluster
-aws eks update-kubeconfig --name kedify-on-eks-blueprint --region eu-west-1
+aws eks update-kubeconfig --name kedify-on-eks-blueprint --region $(cd terraform && terraform output -raw region)
 
-# 5. Build and push container images
+# 5. Build and push container images (also updates manifests)
 make build-push-images
 
 # 6. Deploy applications (creates internal ALB)

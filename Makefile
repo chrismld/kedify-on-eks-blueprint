@@ -54,6 +54,7 @@ setup-infra:
 build-push-images:
 	@echo "🔨 Building and pushing images..."
 	bash scripts/build-images.sh
+	bash scripts/update-manifests.sh
 
 deploy-apps:
 	@echo "🚀 Deploying applications..."

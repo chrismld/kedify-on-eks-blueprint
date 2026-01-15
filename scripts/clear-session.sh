@@ -16,10 +16,15 @@ if [ -z "$SESSION_CODE" ]; then
   exit 1
 fi
 
-AWS_REGION="eu-west-1"
-AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-RESPONSES_BUCKET="ai-workloads-tube-demo-responses-${AWS_ACCOUNT}"
-QUESTIONS_BUCKET="ai-workloads-tube-demo-questions-${AWS_ACCOUNT}"
+# Get config from Terraform
+cd terraform
+AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
+AWS_ACCOUNT=$(terraform output -raw aws_account_id 2>/dev/null || aws sts get-caller-identity --query Account --output text)
+PROJECT_NAME=$(terraform output -raw project_name 2>/dev/null || echo "tube-demo")
+cd ..
+
+RESPONSES_BUCKET="${PROJECT_NAME}-responses-${AWS_ACCOUNT}"
+QUESTIONS_BUCKET="${PROJECT_NAME}-questions-${AWS_ACCOUNT}"
 
 echo "🗑️  Clearing session: $SESSION_CODE"
 echo ""

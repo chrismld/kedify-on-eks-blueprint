@@ -36,10 +36,10 @@ resource "aws_iam_policy" "api_s3_access" {
           "s3:DeleteObject"
         ]
         Resource = [
-          "arn:aws:s3:::ai-workloads-tube-demo-questions-*",
-          "arn:aws:s3:::ai-workloads-tube-demo-questions-*/*",
-          "arn:aws:s3:::ai-workloads-tube-demo-responses-*",
-          "arn:aws:s3:::ai-workloads-tube-demo-responses-*/*"
+          "arn:aws:s3:::${var.project_name}-questions-*",
+          "arn:aws:s3:::${var.project_name}-questions-*/*",
+          "arn:aws:s3:::${var.project_name}-responses-*",
+          "arn:aws:s3:::${var.project_name}-responses-*/*"
         ]
       },
       {
@@ -49,8 +49,8 @@ resource "aws_iam_policy" "api_s3_access" {
           "s3:PutPublicAccessBlock"
         ]
         Resource = [
-          "arn:aws:s3:::ai-workloads-tube-demo-questions-*",
-          "arn:aws:s3:::ai-workloads-tube-demo-responses-*"
+          "arn:aws:s3:::${var.project_name}-questions-*",
+          "arn:aws:s3:::${var.project_name}-responses-*"
         ]
       },
       {

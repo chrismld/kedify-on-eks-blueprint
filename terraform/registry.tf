@@ -1,5 +1,5 @@
 resource "aws_ecr_repository" "api" {
-  name                 = "ai-workloads-tube-demo/api"
+  name                 = "${var.project_name}/api"
   image_tag_mutability = "MUTABLE"
   image_scanning_configuration {
     scan_on_push = false
@@ -7,7 +7,7 @@ resource "aws_ecr_repository" "api" {
 }
 
 resource "aws_ecr_repository" "frontend" {
-  name                 = "ai-workloads-tube-demo/frontend"
+  name                 = "${var.project_name}/frontend"
   image_tag_mutability = "MUTABLE"
   image_scanning_configuration {
     scan_on_push = false
@@ -15,7 +15,7 @@ resource "aws_ecr_repository" "frontend" {
 }
 
 resource "aws_ecr_repository" "vllm" {
-  name                 = "ai-workloads-tube-demo/vllm"
+  name                 = "${var.project_name}/vllm"
   image_tag_mutability = "MUTABLE"
   image_scanning_configuration {
     scan_on_push = false

@@ -20,10 +20,7 @@ spec:
         values: ["spot"]
       - key: karpenter.k8s.aws/instance-family
         operator: In
-        values: ["g5"]
-      - key: karpenter.k8s.aws/instance-size
-        operator: In
-        values: ["2xlarge", "4xlarge", "12xlarge"]
+        values: ["p","g"]
       taints:
       - key: nvidia.com/gpu
         effect: NoSchedule

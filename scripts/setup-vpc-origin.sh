@@ -3,12 +3,17 @@ set -e
 
 echo "🔧 Setting up CloudFront VPC Origin for internal ALB..."
 
+# Get region from Terraform
+cd terraform
+AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
+cd ..
+
 # Get ALB ARN
-echo "📋 Getting ALB ARN..."
+echo "📋 Getting ALB ARN from region: $AWS_REGION..."
 ALB_ARN=$(aws elbv2 describe-load-balancers \
   --query "LoadBalancers[?contains(LoadBalancerName, 'k8s-default-frontend')].LoadBalancerArn" \
   --output text \
-  --region eu-west-1)
+  --region $AWS_REGION)
 
 if [ -z "$ALB_ARN" ]; then
   echo "❌ Error: Could not find internal ALB"

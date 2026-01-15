@@ -38,6 +38,8 @@ spec:
               optional: true
         - name: AWS_REGION
           value: "eu-west-1"
+        - name: PROJECT_NAME
+          value: "ai-workloads-tube-demo"
 ---
 apiVersion: v1
 kind: ConfigMap

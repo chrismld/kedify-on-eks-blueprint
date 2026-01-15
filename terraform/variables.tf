@@ -4,6 +4,12 @@ variable "region" {
   default     = "eu-west-1"
 }
 
+variable "project_name" {
+  description = "Project name used for resource naming"
+  type        = string
+  default     = "tube-demo"
+}
+
 variable "eks_version" {
   description = "EKS Kubernetes version"
   type        = string

@@ -24,6 +24,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "quiz")
 SESSION_CODE = os.getenv("SESSION_CODE", "DEFAULT")
 VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm:8000")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-1")
+PROJECT_NAME = os.getenv("PROJECT_NAME", "tube-demo")
 
 # Get AWS account ID for unique bucket names
 try:
@@ -32,8 +33,8 @@ try:
 except Exception:
     AWS_ACCOUNT = "default"
 
-RESPONSES_BUCKET = f"ai-workloads-tube-demo-responses-{AWS_ACCOUNT}"
-QUESTIONS_BUCKET = f"ai-workloads-tube-demo-questions-{AWS_ACCOUNT}"
+RESPONSES_BUCKET = f"{PROJECT_NAME}-responses-{AWS_ACCOUNT}"
+QUESTIONS_BUCKET = f"{PROJECT_NAME}-questions-{AWS_ACCOUNT}"
 
 try:
     s3_client = boto3.client("s3", region_name=AWS_REGION)
