@@ -85,10 +85,13 @@ async def get_config():
 async def submit_question(data: dict):
     """Store audience question and get LLM response"""
     question = data.get("question", "").strip()
+    is_test = data.get("test", False)  # Test questions don't amplify traffic
+    
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
     
     question_id = f"question_{int(datetime.now().timestamp() * 1000)}"
+    start_time = datetime.now()
     
     # Get answer from vLLM
     answer = "Processing your question..."
@@ -97,7 +100,7 @@ async def submit_question(data: dict):
             response = await client.post(
                 f"{VLLM_ENDPOINT}/v1/chat/completions",
                 json={
-                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "model": "mistralai/Mistral-7B-Instruct-v0.2",
                     "messages": [
                         {
                             "role": "system",
@@ -119,16 +122,22 @@ async def submit_question(data: dict):
         print(f"vLLM error: {e}")
         answer = "Blimey! The AI is having a bit of a moment. Your question is queued though! 🚇"
     
+    # Calculate response time
+    end_time = datetime.now()
+    response_time_ms = int((end_time - start_time).total_seconds() * 1000)
+    
     question_data = {
         "id": question_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": start_time.isoformat(),
         "question": question,
         "answer": answer,
-        "multiplier": 50
+        "multiplier": 1 if is_test else 50,  # Test questions don't amplify
+        "response_time_ms": response_time_ms,
+        "is_test": is_test
     }
     
-    # Store in S3 if available
-    if s3_client:
+    # Store in S3 if available (only non-test questions)
+    if s3_client and not is_test:
         try:
             s3_client.put_object(
                 Bucket=QUESTIONS_BUCKET,
@@ -138,11 +147,18 @@ async def submit_question(data: dict):
         except Exception as e:
             print(f"S3 error: {e}")
     
-    # Also store in memory
-    questions_store.append(question_data)
-    stats_cache["totalQuestions"] = len(questions_store)
+    # Also store in memory (only non-test questions count)
+    if not is_test:
+        questions_store.append(question_data)
+        stats_cache["totalQuestions"] = len(questions_store)
     
-    return {"id": question_id, "status": "submitted", "answer": answer}
+    return {
+        "id": question_id,
+        "status": "submitted",
+        "answer": answer,
+        "response_time_ms": response_time_ms,
+        "is_test": is_test
+    }
 
 @app.get("/api/stats")
 async def get_stats():

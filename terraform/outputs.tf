@@ -18,6 +18,11 @@ output "cloudfront_url" {
   value       = "https://${aws_cloudfront_distribution.frontend.domain_name}"
 }
 
+output "cloudfront_distribution_id" {
+  description = "CloudFront distribution ID"
+  value       = aws_cloudfront_distribution.frontend.id
+}
+
 output "internal_alb_dns" {
   description = "Internal ALB DNS name"
   value       = data.aws_lb.frontend_alb.dns_name

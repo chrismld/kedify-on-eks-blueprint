@@ -7,6 +7,9 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const [answer, setAnswer] = useState('')
+  const [responseTime, setResponseTime] = useState(0)
+  const [isTest, setIsTest] = useState(false)
+  const [showAskAgain, setShowAskAgain] = useState(false)
   const [stats, setStats] = useState(null)
 
   useEffect(() => {
@@ -39,23 +42,35 @@ export default function Home() {
     }
   }, [submitted])
 
-  const handleSend = async (e) => {
+  const handleSend = async (e, testMode = false) => {
     e.preventDefault()
     if (!question.trim()) return
     
     setLoading(true)
+    setIsTest(testMode)
     try {
       const res = await axios.post('/api/question/submit', {
-        question: question.trim()
+        question: question.trim(),
+        test: testMode
       })
       setAnswer(res.data.answer || 'Answer coming soon!')
+      setResponseTime(res.data.response_time_ms || 0)
       setSubmitted(true)
+      setQuestion('')
+      setShowAskAgain(false)
     } catch (e) {
       console.error(e)
       alert('Failed to submit question. Please try again.')
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleAskAgain = () => {
+    setSubmitted(false)
+    setAnswer('')
+    setResponseTime(0)
+    setShowAskAgain(false)
   }
 
   if (mode === 'loading') return <div className="loader">Loading...</div>
@@ -65,23 +80,37 @@ export default function Home() {
     return (
       <div className="success-container">
         <div className="success-card">
-          <h1>✅ Question Submitted!</h1>
+          <h1>✅ Question {isTest ? 'Tested' : 'Submitted'}!</h1>
           
           {answer && (
             <div className="answer-box">
               <h3>🚇 Your Answer:</h3>
               <p className="answer-text">{answer}</p>
+              <div className="response-stats">
+                <span className="stat-badge">⚡ {(responseTime / 1000).toFixed(2)}s response time</span>
+                {isTest && <span className="stat-badge test-badge">🧪 Test mode (no traffic amplification)</span>}
+              </div>
             </div>
           )}
           
-          <p className="thanks-message">
-            Thanks! Your question is now powering the demo! 🚇
-          </p>
-          <p className="watch-message">
-            Watch the big screen to see Kubernetes scale!
-          </p>
+          {!isTest && (
+            <>
+              <p className="thanks-message">
+                Thanks! Your question is now powering the demo! 🚇
+              </p>
+              <p className="watch-message">
+                Watch the big screen to see Kubernetes scale!
+              </p>
+            </>
+          )}
           
-          {stats && (
+          {isTest && (
+            <p className="test-message">
+              This was a test question - no scaling triggered! 😉
+            </p>
+          )}
+          
+          {stats && !isTest && (
             <div className="stats-box">
               <h3>📊 Current Status</h3>
               <div className="stat-row">
@@ -106,9 +135,51 @@ export default function Home() {
             </div>
           )}
           
-          <p className="footer-message">
-            Stay tuned for the survey at the end! 🎁
-          </p>
+          {!showAskAgain && (
+            <div className="ask-again-hint">
+              <p className="hint-text">
+                👀 Eyes on the screen for the scaling magic!
+              </p>
+              <button 
+                className="subtle-button"
+                onClick={() => setShowAskAgain(true)}
+              >
+                (Psst... want to test another question?)
+              </button>
+            </div>
+          )}
+          
+          {showAskAgain && (
+            <div className="ask-again-box">
+              <p className="ask-again-message">
+                Fancy another go? This one won't add to the scaling load - just for fun! 😄
+              </p>
+              <form onSubmit={(e) => handleSend(e, true)}>
+                <textarea
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder="Ask another Tube question (test mode - no scaling)"
+                  disabled={loading}
+                  rows="2"
+                  maxLength="200"
+                />
+                <div className="button-group">
+                  <button type="submit" disabled={loading || !question.trim()} className="test-button">
+                    {loading ? 'Testing...' : 'Test Question'}
+                  </button>
+                  <button type="button" onClick={() => setShowAskAgain(false)} className="cancel-button">
+                    Nah, I'll watch
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+          
+          {!isTest && (
+            <p className="footer-message">
+              Stay tuned for the survey at the end! 🎁
+            </p>
+          )}
         </div>
       </div>
     )

@@ -345,3 +345,141 @@ button:disabled {
     padding: 1.5rem;
   }
 }
+
+/* London Underground Answer Box */
+.answer-box {
+  background: #000033;
+  border: 4px solid #DC241F;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+  position: relative;
+  box-shadow: 0 8px 24px rgba(220, 36, 31, 0.4);
+}
+
+.answer-box h3 {
+  color: #FFFFFF;
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  margin-bottom: 1rem;
+  text-align: left;
+  font-size: 1.2rem;
+}
+
+.answer-text {
+  background: #FFFFFF;
+  color: #000033;
+  padding: 1.25rem;
+  border-radius: 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 1.1rem;
+  line-height: 1.6;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  border: 3px solid #DC241F;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.response-stats {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.stat-badge {
+  background: #DC241F;
+  color: #FFFFFF;
+  padding: 0.5rem 1rem;
+  border-radius: 20px;
+  font-size: 0.9rem;
+  font-weight: bold;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 1px;
+  box-shadow: 0 2px 8px rgba(220, 36, 31, 0.3);
+}
+
+.test-badge {
+  background: #0019A8;
+}
+
+.test-message {
+  text-align: center;
+  color: #0019A8;
+  font-size: 1.1rem;
+  margin: 1rem 0;
+  font-weight: 600;
+}
+
+/* Ask Again Section */
+.ask-again-hint {
+  margin-top: 2rem;
+  text-align: center;
+}
+
+.hint-text {
+  color: #fbbf24;
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  font-weight: 600;
+}
+
+.subtle-button {
+  background: transparent;
+  border: 2px dashed #64748b;
+  color: #94a3b8;
+  padding: 0.75rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: normal;
+  transition: all 0.3s;
+}
+
+.subtle-button:hover {
+  border-color: #38bdf8;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  transform: translateY(-1px);
+}
+
+.ask-again-box {
+  background: rgba(56, 189, 248, 0.1);
+  border: 2px solid #38bdf8;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.ask-again-message {
+  text-align: center;
+  color: #38bdf8;
+  margin-bottom: 1rem;
+  font-size: 1.05rem;
+}
+
+.button-group {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.button-group button {
+  flex: 1;
+}
+
+.test-button {
+  background: linear-gradient(135deg, #0019A8 0%, #001580 100%);
+  color: #FFFFFF;
+}
+
+.cancel-button {
+  background: transparent;
+  border: 2px solid #64748b;
+  color: #94a3b8;
+}
+
+.cancel-button:hover {
+  background: rgba(100, 116, 139, 0.2);
+  border-color: #94a3b8;
+}
