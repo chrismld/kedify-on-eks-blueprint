@@ -4,10 +4,18 @@ set -e
 echo "🎯 Switching to survey mode..."
 echo ""
 
-# Archive current session if it exists
-AWS_REGION="eu-west-1"
-PROJECT_NAME="ai-workloads-tube-demo"
+# Get config from Terraform if available
+if [ -d "terraform" ] && [ -f "terraform/terraform.tfstate" ]; then
+  cd terraform
+  AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
+  PROJECT_NAME=$(terraform output -raw project_name 2>/dev/null || echo "ai-workloads-tube-demo")
+  cd ..
+else
+  AWS_REGION="eu-west-1"
+  PROJECT_NAME="ai-workloads-tube-demo"
+fi
 
+# Archive current session if it exists
 AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
 if [ -z "$AWS_ACCOUNT" ]; then
   echo "❌ Error: Could not determine AWS account ID"

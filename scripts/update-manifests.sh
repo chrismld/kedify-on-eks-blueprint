@@ -20,25 +20,22 @@ echo "   Project: ${PROJECT_NAME}"
 echo "   Registry: ${REGISTRY}"
 echo ""
 
-# Update API deployment
-echo "📝 Updating kubernetes/api/deployment.yaml..."
-sed -i.bak \
+# Update API deployment from template
+echo "📝 Generating kubernetes/api/deployment.yaml from template..."
+sed \
   -e "s|REGISTRY_PLACEHOLDER|${REGISTRY}|g" \
   -e "s|PROJECT_PLACEHOLDER|${PROJECT_NAME}|g" \
   -e "s|REGION_PLACEHOLDER|${AWS_REGION}|g" \
-  kubernetes/api/deployment.yaml
+  kubernetes/api/deployment.yaml.template > kubernetes/api/deployment.yaml
 
-# Update Frontend deployment
-echo "📝 Updating kubernetes/frontend/deployment.yaml..."
-sed -i.bak \
+# Update Frontend deployment from template
+echo "📝 Generating kubernetes/frontend/deployment.yaml from template..."
+sed \
   -e "s|REGISTRY_PLACEHOLDER|${REGISTRY}|g" \
   -e "s|PROJECT_PLACEHOLDER|${PROJECT_NAME}|g" \
-  kubernetes/frontend/deployment.yaml
+  kubernetes/frontend/deployment.yaml.template > kubernetes/frontend/deployment.yaml
 
-# Clean up backup files
-rm -f kubernetes/api/deployment.yaml.bak
-rm -f kubernetes/frontend/deployment.yaml.bak
-
-echo "✅ Manifests updated!"
+echo "✅ Manifests generated from templates!"
 echo ""
 echo "💡 You can now deploy with: make deploy-apps"
+

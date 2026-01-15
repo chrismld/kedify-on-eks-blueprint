@@ -13,6 +13,10 @@ terraform.tfvars
 kubeconfig
 *.kubeconfig
 
+# Generated Kubernetes manifests (from templates)
+kubernetes/api/deployment.yaml
+kubernetes/frontend/deployment.yaml
+
 # Environment
 .env
 .env.local
