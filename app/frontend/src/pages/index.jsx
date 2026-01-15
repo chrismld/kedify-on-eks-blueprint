@@ -87,7 +87,9 @@ export default function Home() {
               <h3>🚇 Your Answer:</h3>
               <p className="answer-text">{answer}</p>
               <div className="response-stats">
-                <span className="stat-badge">⚡ {(responseTime / 1000).toFixed(2)}s response time</span>
+                {responseTime > 0 && (
+                  <span className="stat-badge">⚡ {(responseTime / 1000).toFixed(2)}s response time</span>
+                )}
                 {isTest && <span className="stat-badge test-badge">🧪 Test mode (no traffic amplification)</span>}
               </div>
             </div>
@@ -110,7 +112,7 @@ export default function Home() {
             </p>
           )}
           
-          {stats && !isTest && (
+          {stats && (
             <div className="stats-box">
               <h3>📊 Current Status</h3>
               <div className="stat-row">
@@ -124,14 +126,18 @@ export default function Home() {
                   {stats.scaling && <span className="scaling-badge">SCALING!</span>}
                 </span>
               </div>
-              <div className="stat-row">
-                <span className="stat-label">Your contribution:</span>
-                <span className="stat-value highlight">50x multiplier 🚀</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">Total questions:</span>
-                <span className="stat-value">{stats.totalQuestions}</span>
-              </div>
+              {!isTest && (
+                <>
+                  <div className="stat-row">
+                    <span className="stat-label">Your contribution:</span>
+                    <span className="stat-value highlight">50x multiplier 🚀</span>
+                  </div>
+                  <div className="stat-row">
+                    <span className="stat-label">Total questions:</span>
+                    <span className="stat-value">{stats.totalQuestions}</span>
+                  </div>
+                </>
+              )}
             </div>
           )}
           

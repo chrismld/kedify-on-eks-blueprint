@@ -125,6 +125,7 @@ async def submit_question(data: dict):
     # Calculate response time
     end_time = datetime.now()
     response_time_ms = int((end_time - start_time).total_seconds() * 1000)
+    print(f"Response time: {response_time_ms}ms for question: {question[:50]}...")
     
     question_data = {
         "id": question_id,
