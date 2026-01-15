@@ -108,14 +108,14 @@ The script will display the frontend URL. Share this with your audience via QR c
 
 ### Session Management (Multiple Sessions)
 
-If you're running multiple sessions, set a unique session code before starting:
+**Session Management:** By default, sessions use today's date (e.g., JAN15). For multiple sessions in one day, add a suffix like JAN15AM or JAN15PM.
 
 ```bash
-# Set session code (e.g., JAN15AM, JAN15PM, SESSION1, etc.)
-./scripts/set-session.sh JAN15AM
+# Use today's date as session code (default)
+make enable-survey
 
-# Or set it when enabling survey mode
-./scripts/enable-survey.sh JAN15AM
+# Or specify a custom session code for multiple sessions per day
+make enable-survey SESSION=JAN15PM
 ```
 
 This keeps survey responses and winners separate per session. You can pick winners later:
@@ -124,40 +124,59 @@ This keeps survey responses and winners separate per session. You can pick winne
 # List all sessions with response counts
 ./scripts/list-sessions.sh
 
-# Pick winners for a specific session
-./scripts/pick-winners.sh JAN15AM
+# Pick winners for a specific session (defaults to today's date)
+./scripts/pick-winners.sh
+# Or for a custom session:
+./scripts/pick-winners.sh JAN15PM
 
-# Clear all data for a session (questions, responses, winners)
-./scripts/clear-session.sh JAN15AM
+# Clear all data for a session
+./scripts/clear-session.sh JAN15PM
 ```
 
 **Session Code Tips:**
-- Use memorable codes: `JAN15AM`, `JAN15PM`, `KUBECON`, `MEETUP1`
-- Set before starting the demo or when enabling survey mode
+- Default: Uses today's date automatically (e.g., JAN15)
+- Multiple sessions per day: Add suffix like `JAN15AM`, `JAN15PM`
+- Custom codes: Use memorable names like `KUBECON`, `MEETUP1`
 - Each session stores data separately in S3
 - You can review and pick winners anytime after the session
 
 At **T+25 minutes**, switch to survey mode:
 
 ```bash
-# Without session code (uses DEFAULT)
+# Uses today's date as session code (e.g., JAN15)
 make enable-survey
 
-# Or with session code
-./scripts/enable-survey.sh JAN15PM
+# Or specify custom session code for multiple sessions per day
+make enable-survey SESSION=JAN15PM
 ```
 
 This flips the app to survey mode. At **T+28 minutes**, pick winners:
 
 ```bash
-# For default session
+# Uses today's date as session code
 make pick-winners
 
-# Or for specific session
-./scripts/pick-winners.sh JAN15PM
+# Or specify the same custom session code
+make pick-winners SESSION=JAN15PM
 ```
 
-When done:
+### Restarting the Demo
+
+To restart the demo back to quiz mode (for a new session or to reset):
+
+```bash
+# Restart with a new session (uses today's date by default)
+make restart-demo
+
+# Or specify a custom session code
+make restart-demo SESSION=JAN15PM2
+```
+
+This switches the app back to quiz mode and clears the current session state. Previous session data remains in S3.
+
+### Cleanup
+
+When completely done:
 
 ```bash
 make teardown

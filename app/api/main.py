@@ -81,7 +81,23 @@ async def health():
 @app.get("/api/config")
 async def get_config():
     """Frontend polls this to detect mode"""
-    return {"mode": DEMO_MODE, "sessionCode": SESSION_CODE}
+    # Check if winners have been picked for this session
+    winners_picked = False
+    if s3_client and DEMO_MODE == "survey":
+        try:
+            s3_client.head_object(
+                Bucket=RESPONSES_BUCKET,
+                Key=f"{SESSION_CODE}/winners.json"
+            )
+            winners_picked = True
+        except:
+            pass
+    
+    return {
+        "mode": DEMO_MODE,
+        "sessionCode": SESSION_CODE,
+        "winnersPicked": winners_picked
+    }
 
 @app.post("/api/question/submit")
 async def submit_question(data: dict):

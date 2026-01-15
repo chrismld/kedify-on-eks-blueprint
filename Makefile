@@ -1,4 +1,4 @@
-.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard enable-survey pick-winners teardown get-frontend-url generate-qr help
+.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard restart-demo enable-survey pick-winners teardown get-frontend-url generate-qr help
 
 # Ensure /usr/local/bin is in PATH for kubectl and aws
 export PATH := $(PATH):/usr/local/bin
@@ -14,6 +14,7 @@ help:
 	@echo "  make generate-qr         Generate QR code for audience"
 	@echo "  make run-demo            Start k6 load gen and terminal dashboard"
 	@echo "  make dashboard           Start terminal dashboard only"
+	@echo "  make restart-demo        Restart demo to quiz mode (new session)"
 	@echo "  make enable-survey       Switch to survey mode (T+28min)"
 	@echo "  make pick-winners        Draw 2 random winners (T+29min)"
 	@echo "  make list-sessions       List all sessions with response counts"
@@ -96,13 +97,17 @@ dashboard:
 	@echo "📊 Starting terminal dashboard..."
 	bash scripts/dashboard.sh
 
+restart-demo:
+	@echo "🔄 Restarting demo to quiz mode..."
+	bash scripts/restart-demo.sh $(SESSION)
+
 enable-survey:
 	@echo "📝 Switching to survey mode..."
-	bash scripts/enable-survey.sh
+	bash scripts/enable-survey.sh $(SESSION)
 
 pick-winners:
 	@echo "🎁 Drawing winners..."
-	bash scripts/pick-winners.sh
+	bash scripts/pick-winners.sh $(SESSION)
 
 list-sessions:
 	@echo "📋 Listing all sessions..."

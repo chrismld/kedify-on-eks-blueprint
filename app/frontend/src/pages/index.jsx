@@ -4,6 +4,7 @@ import axios from 'axios'
 export default function Home() {
   const [mode, setMode] = useState('loading')
   const [sessionCode, setSessionCode] = useState('')
+  const [winnersPicked, setWinnersPicked] = useState(false)
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -19,6 +20,7 @@ export default function Home() {
         const res = await axios.get('/api/config')
         setMode(res.data.mode)
         setSessionCode(res.data.sessionCode || 'DEFAULT')
+        setWinnersPicked(res.data.winnersPicked || false)
       } catch (e) {
         setMode('quiz')
       }
@@ -76,7 +78,12 @@ export default function Home() {
   }
 
   if (mode === 'loading') return <div className="loader">Loading...</div>
-  if (mode === 'survey') return <SurveyPage sessionCode={sessionCode} />
+  if (mode === 'survey') {
+    if (winnersPicked) {
+      return <SessionClosedPage sessionCode={sessionCode} />
+    }
+    return <SurveyPage sessionCode={sessionCode} />
+  }
 
   if (submitted) {
     return (
@@ -225,6 +232,26 @@ export default function Home() {
   )
 }
 
+function SessionClosedPage({ sessionCode }) {
+  return (
+    <div className="survey-container">
+      <div className="survey-card">
+        <h1>🎁 Session Complete!</h1>
+        <div className="thanks-content">
+          <p className="tube-emoji">🚇</p>
+          <p>Thanks for participating in session <strong>{sessionCode}</strong>!</p>
+          <p className="closed-message">
+            Winners have been announced for this session.
+          </p>
+          <p className="next-session-message">
+            See you at the next demo! 👋
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SurveyPage({ sessionCode }) {
   const [rating, setRating] = useState(5)
   const [company, setCompany] = useState('')
@@ -247,11 +274,16 @@ function SurveyPage({ sessionCode }) {
       const checkWinner = async () => {
         try {
           const res = await axios.get('/api/survey/winners')
+          console.log('Checking winners:', {
+            myResponseId: responseId,
+            winnersData: res.data,
+            isWinner: res.data.winners && res.data.winners.includes(responseId)
+          })
           if (res.data.winners && res.data.winners.includes(responseId)) {
             setIsWinner(true)
           }
         } catch (e) {
-          console.error(e)
+          console.error('Error checking winners:', e)
         }
       }
       checkWinner()
@@ -288,7 +320,7 @@ function SurveyPage({ sessionCode }) {
             <p className="winner-message">You won a copy of</p>
             <p className="book-title">"Kubernetes Autoscaling"!</p>
             <p className="claim-message">
-              🏃‍♂️� Quick! Find the speaker before they scale away!
+              🏃‍♂️ Quick! Find the speaker before they scale away!
             </p>
             <p className="claim-submessage">
               Your mission: Locate and claim your prize! ⏱️

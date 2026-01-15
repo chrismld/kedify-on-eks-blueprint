@@ -12,13 +12,13 @@ data "aws_lb" "frontend_alb" {
   depends_on = [helm_release.aws_load_balancer_controller]
 }
 
-# CloudFront cache policy
+# CloudFront cache policy - Disabled for demo (always fetch from origin)
 resource "aws_cloudfront_cache_policy" "frontend" {
   name        = "${local.name}-frontend-cache-policy"
-  comment     = "Cache policy for frontend application"
-  default_ttl = 86400
-  max_ttl     = 31536000
-  min_ttl     = 1
+  comment     = "No caching - always fetch from origin for demo"
+  default_ttl = 0
+  max_ttl     = 0
+  min_ttl     = 0
 
   parameters_in_cache_key_and_forwarded_to_origin {
     cookies_config {
@@ -30,11 +30,11 @@ resource "aws_cloudfront_cache_policy" "frontend" {
     }
 
     query_strings_config {
-      query_string_behavior = "all"
+      query_string_behavior = "none"
     }
 
-    enable_accept_encoding_gzip   = true
-    enable_accept_encoding_brotli = true
+    enable_accept_encoding_gzip   = false
+    enable_accept_encoding_brotli = false
   }
 }
 

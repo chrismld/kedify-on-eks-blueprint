@@ -10,12 +10,12 @@ if [ -z "$SESSION_CODE" ]; then
   echo ""
 fi
 
-echo "🎯 Switching to survey mode (Session: $SESSION_CODE)..."
+echo "🔄 Restarting demo to quiz mode (Session: $SESSION_CODE)..."
 
 kubectl patch configmap api-config \
   -n default \
   --type merge \
-  -p "{\"data\":{\"DEMO_MODE\":\"survey\",\"SESSION_CODE\":\"$SESSION_CODE\"}}"
+  -p "{\"data\":{\"DEMO_MODE\":\"quiz\",\"SESSION_CODE\":\"$SESSION_CODE\"}}"
 
 echo "🔄 Restarting API to pick up new mode..."
 kubectl rollout restart deployment/api -n default
@@ -23,9 +23,9 @@ kubectl rollout restart deployment/api -n default
 echo "⏳ Waiting for API to be ready..."
 kubectl rollout status deployment/api -n default
 
-echo "✅ Survey mode enabled for session: $SESSION_CODE"
+echo "✅ Demo restarted in quiz mode for session: $SESSION_CODE"
 echo ""
-echo "💡 Refresh the frontend page to see the survey"
+echo "💡 Refresh the frontend page to see the quiz"
 echo ""
-echo "📋 To list all sessions later: ./scripts/list-sessions.sh"
-echo "🎁 To pick winners: ./scripts/pick-winners.sh $SESSION_CODE"
+echo "📋 When ready for survey (T+25min): make enable-survey SESSION=$SESSION_CODE"
+echo "🎁 To pick winners (T+28min): make pick-winners SESSION=$SESSION_CODE"
