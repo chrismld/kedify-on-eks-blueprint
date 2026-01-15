@@ -293,6 +293,14 @@ button:disabled {
   margin-top: 2rem;
 }
 
+.claim-submessage {
+  font-size: 1.1rem;
+  color: #fbbf24;
+  margin-top: 1rem;
+  font-weight: 600;
+  animation: pulse 1.5s infinite;
+}
+
 .thanks-content {
   text-align: center;
   padding: 2rem 0;

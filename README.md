@@ -90,16 +90,55 @@ The script will display the frontend URL. Share this with your audience via QR c
 3. **Minutes 25-28**: Switch to survey mode
 4. **Minutes 28-30**: Draw winners
 
+### Session Management (Multiple Sessions)
+
+If you're running multiple sessions, set a unique session code before starting:
+
+```bash
+# Set session code (e.g., JAN15AM, JAN15PM, SESSION1, etc.)
+./scripts/set-session.sh JAN15AM
+
+# Or set it when enabling survey mode
+./scripts/enable-survey.sh JAN15AM
+```
+
+This keeps survey responses and winners separate per session. You can pick winners later:
+
+```bash
+# List all sessions with response counts
+./scripts/list-sessions.sh
+
+# Pick winners for a specific session
+./scripts/pick-winners.sh JAN15AM
+
+# Clear all data for a session (questions, responses, winners)
+./scripts/clear-session.sh JAN15AM
+```
+
+**Session Code Tips:**
+- Use memorable codes: `JAN15AM`, `JAN15PM`, `KUBECON`, `MEETUP1`
+- Set before starting the demo or when enabling survey mode
+- Each session stores data separately in S3
+- You can review and pick winners anytime after the session
+
 At **T+25 minutes**, switch to survey mode:
 
 ```bash
+# Without session code (uses DEFAULT)
 make enable-survey
+
+# Or with session code
+./scripts/enable-survey.sh JAN15PM
 ```
 
 This flips the app to survey mode. At **T+28 minutes**, pick winners:
 
 ```bash
+# For default session
 make pick-winners
+
+# Or for specific session
+./scripts/pick-winners.sh JAN15PM
 ```
 
 When done:

@@ -3,6 +3,7 @@ import axios from 'axios'
 
 export default function Home() {
   const [mode, setMode] = useState('loading')
+  const [sessionCode, setSessionCode] = useState('')
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -17,6 +18,7 @@ export default function Home() {
       try {
         const res = await axios.get('/api/config')
         setMode(res.data.mode)
+        setSessionCode(res.data.sessionCode || 'DEFAULT')
       } catch (e) {
         setMode('quiz')
       }
@@ -74,7 +76,7 @@ export default function Home() {
   }
 
   if (mode === 'loading') return <div className="loader">Loading...</div>
-  if (mode === 'survey') return <SurveyPage />
+  if (mode === 'survey') return <SurveyPage sessionCode={sessionCode} />
 
   if (submitted) {
     return (
@@ -223,12 +225,22 @@ export default function Home() {
   )
 }
 
-function SurveyPage() {
+function SurveyPage({ sessionCode }) {
   const [rating, setRating] = useState(5)
   const [company, setCompany] = useState('')
+  const [feedback, setFeedback] = useState('')
   const [submitted, setSubmitted] = useState(false)
   const [isWinner, setIsWinner] = useState(false)
   const [responseId, setResponseId] = useState(null)
+
+  // Check if already submitted on mount (per session)
+  useEffect(() => {
+    const savedResponseId = localStorage.getItem(`surveyResponseId_${sessionCode}`)
+    if (savedResponseId) {
+      setResponseId(savedResponseId)
+      setSubmitted(true)
+    }
+  }, [sessionCode])
 
   useEffect(() => {
     if (submitted && responseId) {
@@ -251,9 +263,16 @@ function SurveyPage() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     try {
-      const res = await axios.post('/api/survey/submit', { rating, company })
-      setResponseId(res.data.id)
+      const res = await axios.post('/api/survey/submit', { 
+        rating, 
+        company,
+        feedback 
+      })
+      const newResponseId = res.data.id
+      setResponseId(newResponseId)
       setSubmitted(true)
+      // Save to localStorage per session to prevent duplicate submissions
+      localStorage.setItem(`surveyResponseId_${sessionCode}`, newResponseId)
     } catch (e) {
       console.error(e)
       alert('Failed to submit survey. Please try again.')
@@ -269,7 +288,10 @@ function SurveyPage() {
             <p className="winner-message">You won a copy of</p>
             <p className="book-title">"Kubernetes Autoscaling"!</p>
             <p className="claim-message">
-              📚 Please come to the front to collect your prize!
+              🏃‍♂️� Quick! Find the speaker before they scale away!
+            </p>
+            <p className="claim-submessage">
+              Your mission: Locate and claim your prize! ⏱️
             </p>
           </div>
         </div>
@@ -298,6 +320,9 @@ function SurveyPage() {
       <div className="survey-card">
         <h1>📝 Session Survey</h1>
         <p className="survey-subtitle">Help us improve & enter the raffle!</p>
+        {sessionCode && sessionCode !== 'DEFAULT' && (
+          <p className="session-badge">Session: {sessionCode}</p>
+        )}
         
         <form onSubmit={handleSubmit}>
           <div className="form-group">
@@ -327,6 +352,19 @@ function SurveyPage() {
               placeholder="e.g., Acme Corp"
               maxLength="100"
             />
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="feedback">Any feedback for the speaker? (optional):</label>
+            <textarea
+              id="feedback"
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="Share your thoughts, suggestions, or what you loved! 💭"
+              rows="3"
+              maxLength="500"
+            />
+            <div className="char-count">{feedback.length}/500</div>
           </div>
           
           <button type="submit">Submit & Enter Raffle</button>

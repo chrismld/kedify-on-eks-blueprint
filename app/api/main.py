@@ -21,6 +21,7 @@ app.add_middleware(
 
 # Config
 DEMO_MODE = os.getenv("DEMO_MODE", "quiz")
+SESSION_CODE = os.getenv("SESSION_CODE", "DEFAULT")
 VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm:8000")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-1")
 
@@ -79,7 +80,7 @@ async def health():
 @app.get("/api/config")
 async def get_config():
     """Frontend polls this to detect mode"""
-    return {"mode": DEMO_MODE}
+    return {"mode": DEMO_MODE, "sessionCode": SESSION_CODE}
 
 @app.post("/api/question/submit")
 async def submit_question(data: dict):
@@ -142,7 +143,7 @@ async def submit_question(data: dict):
         try:
             s3_client.put_object(
                 Bucket=QUESTIONS_BUCKET,
-                Key=f"questions/{question_id}.json",
+                Key=f"{SESSION_CODE}/questions/{question_id}.json",
                 Body=json.dumps(question_data)
             )
         except Exception as e:
@@ -181,7 +182,7 @@ async def get_questions():
         try:
             response = s3_client.list_objects_v2(
                 Bucket=QUESTIONS_BUCKET,
-                Prefix="questions/"
+                Prefix=f"{SESSION_CODE}/questions/"
             )
             questions = []
             if "Contents" in response:
@@ -213,24 +214,29 @@ async def chat_completion(request: dict):
 @app.post("/api/survey/submit")
 async def submit_survey(data: dict):
     """Store survey response"""
-    if not s3_client:
-        return {"id": "local"}
+    response_id = f"survey_{int(datetime.now().timestamp() * 1000)}"
     
-    try:
-        response_id = f"survey_{int(datetime.now().timestamp() * 1000)}"
-        s3_client.put_object(
-            Bucket=RESPONSES_BUCKET,
-            Key=f"responses/{response_id}.json",
-            Body=json.dumps({
-                "id": response_id,
-                "timestamp": datetime.now().isoformat(),
-                "rating": data.get("rating"),
-                "company": data.get("company")
-            })
-        )
-        return {"id": response_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    response_data = {
+        "id": response_id,
+        "timestamp": datetime.now().isoformat(),
+        "rating": data.get("rating"),
+        "company": data.get("company"),
+        "feedback": data.get("feedback", ""),
+        "sessionCode": SESSION_CODE
+    }
+    
+    if s3_client:
+        try:
+            s3_client.put_object(
+                Bucket=RESPONSES_BUCKET,
+                Key=f"{SESSION_CODE}/responses/{response_id}.json",
+                Body=json.dumps(response_data)
+            )
+            print(f"Survey response saved to S3: {response_id} (session: {SESSION_CODE})")
+        except Exception as e:
+            print(f"S3 error (survey will work without it): {e}")
+    
+    return {"id": response_id}
 
 @app.get("/api/survey/winners")
 async def get_winners():
@@ -241,8 +247,63 @@ async def get_winners():
     try:
         response = s3_client.get_object(
             Bucket=RESPONSES_BUCKET,
-            Key="winners.json"
+            Key=f"{SESSION_CODE}/winners.json"
         )
         return json.loads(response["Body"].read())
     except:
         return {"winners": []}
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """List all session codes with response counts"""
+    if not s3_client:
+        return {"sessions": []}
+    
+    try:
+        # List all prefixes (session codes) in the bucket
+        response = s3_client.list_objects_v2(
+            Bucket=RESPONSES_BUCKET,
+            Delimiter='/'
+        )
+        
+        sessions = []
+        if "CommonPrefixes" in response:
+            for prefix in response["CommonPrefixes"]:
+                session_code = prefix["Prefix"].rstrip('/')
+                
+                # Count responses for this session
+                resp_count = 0
+                try:
+                    resp_list = s3_client.list_objects_v2(
+                        Bucket=RESPONSES_BUCKET,
+                        Prefix=f"{session_code}/responses/"
+                    )
+                    if "Contents" in resp_list:
+                        resp_count = len(resp_list["Contents"])
+                except:
+                    pass
+                
+                # Check if winners have been picked
+                has_winners = False
+                try:
+                    s3_client.head_object(
+                        Bucket=RESPONSES_BUCKET,
+                        Key=f"{session_code}/winners.json"
+                    )
+                    has_winners = True
+                except:
+                    pass
+                
+                sessions.append({
+                    "code": session_code,
+                    "responses": resp_count,
+                    "hasWinners": has_winners
+                })
+        
+        # Sort by session code (most recent first if using date-based codes)
+        sessions.sort(key=lambda x: x["code"], reverse=True)
+        
+        return {"sessions": sessions}
+    except Exception as e:
+        print(f"Error listing sessions: {e}")
+        return {"sessions": []}

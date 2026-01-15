@@ -16,7 +16,15 @@ help:
 	@echo "  make dashboard           Start terminal dashboard only"
 	@echo "  make enable-survey       Switch to survey mode (T+28min)"
 	@echo "  make pick-winners        Draw 2 random winners (T+29min)"
+	@echo "  make list-sessions       List all sessions with response counts"
 	@echo "  make teardown            Destroy all AWS resources"
+	@echo ""
+	@echo "Session Management (for multiple sessions):"
+	@echo "  ./scripts/set-session.sh <code>      Set session code before demo"
+	@echo "  ./scripts/enable-survey.sh <code>    Enable survey with session code"
+	@echo "  ./scripts/pick-winners.sh <code>     Pick winners for specific session"
+	@echo "  ./scripts/list-sessions.sh           List all sessions"
+	@echo "  ./scripts/clear-session.sh <code>    Clear all data for a session"
 	@echo ""
 	@echo "Note: KEDA/Kedify is currently disabled. See SETUP-NOTES.md to re-enable."
 	@echo ""
@@ -94,6 +102,10 @@ enable-survey:
 pick-winners:
 	@echo "🎁 Drawing winners..."
 	bash scripts/pick-winners.sh
+
+list-sessions:
+	@echo "📋 Listing all sessions..."
+	bash scripts/list-sessions.sh
 
 teardown:
 	@echo "💥 Destroying everything..."

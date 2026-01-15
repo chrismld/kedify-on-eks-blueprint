@@ -1,7 +1,20 @@
 #!/bin/bash
 set -e
 
-echo "🎁 Drawing winners..."
+SESSION_CODE="${1:-}"
+
+if [ -z "$SESSION_CODE" ]; then
+  echo "❌ Error: Session code is required"
+  echo ""
+  echo "Usage: $0 <session-code>"
+  echo ""
+  echo "Example: $0 JAN15AM"
+  echo ""
+  echo "💡 To see available sessions, run: ./scripts/list-sessions.sh"
+  exit 1
+fi
+
+echo "🎁 Drawing winners for session: $SESSION_CODE"
 
 AWS_REGION="eu-west-1"
 AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -25,13 +38,15 @@ else
   echo "✅ Bucket created and secured"
 fi
 
-# List responses
-echo "🔍 Looking for survey responses..."
-RESPONSES=$(aws s3 ls s3://$BUCKET/responses/ --recursive 2>/dev/null | awk '{print $4}' | grep -v "^$" || echo "")
+# List responses for this session
+echo "🔍 Looking for survey responses in session $SESSION_CODE..."
+RESPONSES=$(aws s3 ls s3://$BUCKET/$SESSION_CODE/responses/ --recursive 2>/dev/null | awk '{print $4}' | grep -v "^$" || echo "")
 
 if [ -z "$RESPONSES" ]; then
-  echo "❌ No responses found!"
-  echo "   Make sure people have submitted surveys first"
+  echo "❌ No responses found for session: $SESSION_CODE"
+  echo ""
+  echo "💡 Available sessions:"
+  ./scripts/list-sessions.sh
   exit 1
 fi
 
@@ -47,19 +62,19 @@ else
 fi
 
 echo ""
-echo "🎉 Winners:"
-echo "$WINNERS" | sed 's|responses/||g' | sed 's|.json||g'
+echo "🎉 Winners for session $SESSION_CODE:"
+echo "$WINNERS" | sed "s|$SESSION_CODE/responses/||g" | sed 's|.json||g'
 echo ""
 
 # Extract just the IDs for the JSON
-WINNER_IDS=$(echo "$WINNERS" | sed 's|responses/||g' | sed 's|.json||g')
+WINNER_IDS=$(echo "$WINNERS" | sed "s|$SESSION_CODE/responses/||g" | sed 's|.json||g')
 
 # Write winners to S3
 echo "💾 Saving winners to S3..."
-aws s3 cp - s3://$BUCKET/winners.json <<EOF
+aws s3 cp - s3://$BUCKET/$SESSION_CODE/winners.json <<EOF
 {"winners": $(echo "$WINNER_IDS" | jq -Rs 'split("\n") | map(select(length > 0))')}
 EOF
 
-echo "✅ Winners announced!"
+echo "✅ Winners announced for session $SESSION_CODE!"
 echo ""
 echo "💡 Winners will see a notification on their screen automatically"

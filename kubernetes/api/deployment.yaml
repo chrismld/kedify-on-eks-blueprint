@@ -13,6 +13,7 @@ spec:
       labels:
         app: api
     spec:
+      serviceAccountName: api
       nodeSelector:
         intent: apps
       containers:
@@ -29,6 +30,12 @@ spec:
             configMapKeyRef:
               name: api-config
               key: DEMO_MODE
+        - name: SESSION_CODE
+          valueFrom:
+            configMapKeyRef:
+              name: api-config
+              key: SESSION_CODE
+              optional: true
         - name: AWS_REGION
           value: "eu-west-1"
 ---
@@ -39,6 +46,7 @@ metadata:
   namespace: default
 data:
   DEMO_MODE: "quiz"
+  SESSION_CODE: "DEFAULT"
 ---
 apiVersion: v1
 kind: Service
