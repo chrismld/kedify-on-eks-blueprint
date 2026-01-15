@@ -270,6 +270,32 @@ async def get_winners():
     except:
         return {"winners": []}
 
+@app.get("/api/debug/session")
+async def debug_session():
+    """Debug endpoint to check session state"""
+    winners_data = {"winners": []}
+    winners_picked = False
+    
+    if s3_client:
+        try:
+            response = s3_client.get_object(
+                Bucket=RESPONSES_BUCKET,
+                Key=f"{SESSION_CODE}/winners.json"
+            )
+            winners_data = json.loads(response["Body"].read())
+            winners_picked = True
+        except:
+            pass
+    
+    return {
+        "mode": DEMO_MODE,
+        "sessionCode": SESSION_CODE,
+        "winnersPicked": winners_picked,
+        "winners": winners_data,
+        "bucket": RESPONSES_BUCKET,
+        "region": AWS_REGION
+    }
+
 @app.get("/api/sessions")
 async def list_sessions():
     """List all session codes with response counts"""

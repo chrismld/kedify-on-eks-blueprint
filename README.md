@@ -182,6 +182,30 @@ When completely done:
 make teardown
 ```
 
+**Note:** The teardown process does NOT delete S3 buckets containing survey responses. Your data is safe and organized by session code for future analysis.
+
+### Analyzing Survey Responses
+
+Export responses from any session:
+
+```bash
+# List all available sessions
+./scripts/export-responses.sh
+
+# Export specific session
+./scripts/export-responses.sh JAN15
+./scripts/export-responses.sh JAN15PM
+
+# Export to custom directory
+./scripts/export-responses.sh JAN15 ./my-analysis
+```
+
+Responses are organized in S3 by session code:
+- `<SESSION_CODE>/responses/` - All survey submissions
+- `<SESSION_CODE>/winners.json` - Winner announcements
+
+Each response includes: rating, company, feedback, timestamp, and session code.
+
 ## Architecture at a Glance
 
 ```

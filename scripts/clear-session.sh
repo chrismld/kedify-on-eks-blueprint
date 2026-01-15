@@ -8,7 +8,7 @@ if [ -z "$SESSION_CODE" ]; then
   echo ""
   echo "Usage: $0 <session-code>"
   echo ""
-  echo "Example: $0 JAN15AM"
+  echo "Example: $0 JAN15"
   echo ""
   echo "💡 To see available sessions, run: ./scripts/list-sessions.sh"
   echo ""
@@ -16,12 +16,17 @@ if [ -z "$SESSION_CODE" ]; then
   exit 1
 fi
 
-# Get config from Terraform
-cd terraform
-AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
-AWS_ACCOUNT=$(terraform output -raw aws_account_id 2>/dev/null || aws sts get-caller-identity --query Account --output text)
-PROJECT_NAME=$(terraform output -raw project_name 2>/dev/null || echo "tube-demo")
-cd ..
+# Use defaults
+AWS_REGION="eu-west-1"
+PROJECT_NAME="ai-workloads-tube-demo"
+
+# Get AWS account ID from AWS CLI
+AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+if [ -z "$AWS_ACCOUNT" ]; then
+  echo "❌ Error: Could not determine AWS account ID"
+  echo "   Make sure AWS CLI is configured: aws configure"
+  exit 1
+fi
 
 RESPONSES_BUCKET="${PROJECT_NAME}-responses-${AWS_ACCOUNT}"
 QUESTIONS_BUCKET="${PROJECT_NAME}-questions-${AWS_ACCOUNT}"
@@ -42,10 +47,10 @@ fi
 
 echo ""
 echo "🧹 Deleting questions..."
-aws s3 rm s3://$QUESTIONS_BUCKET/$SESSION_CODE/ --recursive 2>/dev/null || echo "   No questions found"
+aws s3 rm s3://$QUESTIONS_BUCKET/$SESSION_CODE/ --recursive --region $AWS_REGION 2>/dev/null || echo "   No questions found"
 
 echo "🧹 Deleting responses..."
-aws s3 rm s3://$RESPONSES_BUCKET/$SESSION_CODE/ --recursive 2>/dev/null || echo "   No responses found"
+aws s3 rm s3://$RESPONSES_BUCKET/$SESSION_CODE/ --recursive --region $AWS_REGION 2>/dev/null || echo "   No responses found"
 
 echo ""
 echo "✅ Session $SESSION_CODE cleared!"

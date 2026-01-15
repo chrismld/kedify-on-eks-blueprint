@@ -18,7 +18,7 @@ spec:
         intent: apps
       containers:
       - name: api
-        image: REGISTRY_PLACEHOLDER/PROJECT_PLACEHOLDER/api:latest
+        image: 889947746832.dkr.ecr.eu-west-1.amazonaws.com/ai-workloads-tube-demo/api:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
@@ -37,9 +37,9 @@ spec:
               key: SESSION_CODE
               optional: true
         - name: AWS_REGION
-          value: "REGION_PLACEHOLDER"
+          value: "eu-west-1"
         - name: PROJECT_NAME
-          value: "PROJECT_PLACEHOLDER"
+          value: "ai-workloads-tube-demo"
 ---
 apiVersion: v1
 kind: ConfigMap
