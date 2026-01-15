@@ -14,18 +14,10 @@ help:
 	@echo "  make generate-qr         Generate QR code for audience"
 	@echo "  make run-demo            Start k6 load gen and terminal dashboard"
 	@echo "  make dashboard           Start terminal dashboard only"
-	@echo "  make restart-demo        Restart demo to quiz mode (new session)"
-	@echo "  make enable-survey       Switch to survey mode (T+28min)"
-	@echo "  make pick-winners        Draw 2 random winners (T+29min)"
-	@echo "  make list-sessions       List all sessions with response counts"
+	@echo "  make restart-demo        Restart demo to quiz mode"
+	@echo "  make enable-survey       Switch to survey mode (auto-archives previous)"
+	@echo "  make pick-winners        Draw 2 random winners"
 	@echo "  make teardown            Destroy all AWS resources"
-	@echo ""
-	@echo "Session Management (for multiple sessions):"
-	@echo "  ./scripts/set-session.sh <code>      Set session code before demo"
-	@echo "  ./scripts/enable-survey.sh <code>    Enable survey with session code"
-	@echo "  ./scripts/pick-winners.sh <code>     Pick winners for specific session"
-	@echo "  ./scripts/list-sessions.sh           List all sessions"
-	@echo "  ./scripts/clear-session.sh <code>    Clear all data for a session"
 	@echo ""
 	@echo "Note: KEDA/Kedify is currently disabled. See SETUP-NOTES.md to re-enable."
 	@echo ""
@@ -99,19 +91,15 @@ dashboard:
 
 restart-demo:
 	@echo "🔄 Restarting demo to quiz mode..."
-	bash scripts/restart-demo.sh $(SESSION)
+	bash scripts/restart-demo.sh
 
 enable-survey:
 	@echo "📝 Switching to survey mode..."
-	bash scripts/enable-survey.sh $(SESSION)
+	bash scripts/enable-survey.sh
 
 pick-winners:
 	@echo "🎁 Drawing winners..."
-	bash scripts/pick-winners.sh $(SESSION)
-
-list-sessions:
-	@echo "📋 Listing all sessions..."
-	bash scripts/list-sessions.sh
+	bash scripts/pick-winners.sh
 
 teardown:
 	@echo "💥 Destroying everything..."

@@ -3,8 +3,8 @@ import axios from 'axios'
 
 export default function Home() {
   const [mode, setMode] = useState('loading')
-  const [sessionCode, setSessionCode] = useState('')
   const [winnersPicked, setWinnersPicked] = useState(false)
+  const [sessionTimestamp, setSessionTimestamp] = useState(null)
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -19,8 +19,21 @@ export default function Home() {
       try {
         const res = await axios.get('/api/config')
         setMode(res.data.mode)
-        setSessionCode(res.data.sessionCode || 'DEFAULT')
         setWinnersPicked(res.data.winnersPicked || false)
+        
+        // Check if this is a new session
+        if (res.data.sessionTimestamp) {
+          const savedSessionTimestamp = localStorage.getItem('surveySessionTimestamp')
+          if (savedSessionTimestamp && parseInt(savedSessionTimestamp) !== res.data.sessionTimestamp) {
+            // New session detected, clear old response
+            localStorage.removeItem('surveyResponseId')
+            localStorage.setItem('surveySessionTimestamp', res.data.sessionTimestamp.toString())
+          } else if (!savedSessionTimestamp) {
+            // First time seeing this session
+            localStorage.setItem('surveySessionTimestamp', res.data.sessionTimestamp.toString())
+          }
+          setSessionTimestamp(res.data.sessionTimestamp)
+        }
       } catch (e) {
         setMode('quiz')
       }
@@ -79,10 +92,7 @@ export default function Home() {
 
   if (mode === 'loading') return <div className="loader">Loading...</div>
   if (mode === 'survey') {
-    if (winnersPicked) {
-      return <SessionClosedPage sessionCode={sessionCode} />
-    }
-    return <SurveyPage sessionCode={sessionCode} />
+    return <SurveyPage winnersPicked={winnersPicked} />
   }
 
   if (submitted) {
@@ -232,14 +242,14 @@ export default function Home() {
   )
 }
 
-function SessionClosedPage({ sessionCode }) {
+function SessionClosedPage() {
   return (
     <div className="survey-container">
       <div className="survey-card">
         <h1>🎁 Session Complete!</h1>
         <div className="thanks-content">
           <p className="tube-emoji">🚇</p>
-          <p>Thanks for participating in session <strong>{sessionCode}</strong>!</p>
+          <p>Thanks for participating!</p>
           <p className="closed-message">
             Winners have been announced for this session.
           </p>
@@ -252,7 +262,7 @@ function SessionClosedPage({ sessionCode }) {
   )
 }
 
-function SurveyPage({ sessionCode }) {
+function SurveyPage({ winnersPicked }) {
   const [rating, setRating] = useState(5)
   const [company, setCompany] = useState('')
   const [feedback, setFeedback] = useState('')
@@ -260,26 +270,21 @@ function SurveyPage({ sessionCode }) {
   const [isWinner, setIsWinner] = useState(false)
   const [responseId, setResponseId] = useState(null)
 
-  // Check if already submitted on mount (per session)
+  // Check if already submitted
   useEffect(() => {
-    const savedResponseId = localStorage.getItem(`surveyResponseId_${sessionCode}`)
+    const savedResponseId = localStorage.getItem('surveyResponseId')
     if (savedResponseId) {
-      setResponseId(savedResponseId)
       setSubmitted(true)
+      setResponseId(savedResponseId)
     }
-  }, [sessionCode])
+  }, [])
 
   useEffect(() => {
-    if (submitted && responseId) {
+    if (responseId) {
       const checkWinner = async () => {
         try {
           const res = await axios.get('/api/survey/winners')
-          console.log('Checking winners:', {
-            myResponseId: responseId,
-            winnersData: res.data,
-            isWinner: res.data.winners && res.data.winners.includes(responseId)
-          })
-          if (res.data.winners && res.data.winners.includes(responseId)) {
+          if (res.data.winners && Array.isArray(res.data.winners) && res.data.winners.includes(responseId)) {
             setIsWinner(true)
           }
         } catch (e) {
@@ -290,7 +295,7 @@ function SurveyPage({ sessionCode }) {
       const interval = setInterval(checkWinner, 2000)
       return () => clearInterval(interval)
     }
-  }, [submitted, responseId])
+  }, [responseId])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -303,8 +308,7 @@ function SurveyPage({ sessionCode }) {
       const newResponseId = res.data.id
       setResponseId(newResponseId)
       setSubmitted(true)
-      // Save to localStorage per session to prevent duplicate submissions
-      localStorage.setItem(`surveyResponseId_${sessionCode}`, newResponseId)
+      localStorage.setItem('surveyResponseId', newResponseId)
     } catch (e) {
       console.error(e)
       alert('Failed to submit survey. Please try again.')
@@ -332,6 +336,11 @@ function SurveyPage({ sessionCode }) {
   }
 
   if (submitted) {
+    // If winners have been picked but user is not a winner, show closed page
+    if (winnersPicked) {
+      return <SessionClosedPage />
+    }
+    
     return (
       <div className="survey-container">
         <div className="survey-card">
@@ -352,9 +361,6 @@ function SurveyPage({ sessionCode }) {
       <div className="survey-card">
         <h1>📝 Session Survey</h1>
         <p className="survey-subtitle">Help us improve & enter the raffle!</p>
-        {sessionCode && sessionCode !== 'DEFAULT' && (
-          <p className="session-badge">Session: {sessionCode}</p>
-        )}
         
         <form onSubmit={handleSubmit}>
           <div className="form-group">

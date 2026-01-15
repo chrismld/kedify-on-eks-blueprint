@@ -108,71 +108,27 @@ The script will display the frontend URL. Share this with your audience via QR c
 
 ### Session Management (Multiple Sessions)
 
-**Session Management:** By default, sessions use today's date (e.g., JAN15). For multiple sessions in one day, add a suffix like JAN15AM or JAN15PM.
-
-```bash
-# Use today's date as session code (default)
-make enable-survey
-
-# Or specify a custom session code for multiple sessions per day
-make enable-survey SESSION=JAN15PM
-```
-
-This keeps survey responses and winners separate per session. You can pick winners later:
-
-```bash
-# List all sessions with response counts
-./scripts/list-sessions.sh
-
-# Pick winners for a specific session (defaults to today's date)
-./scripts/pick-winners.sh
-# Or for a custom session:
-./scripts/pick-winners.sh JAN15PM
-
-# Clear all data for a session
-./scripts/clear-session.sh JAN15PM
-```
-
-**Session Code Tips:**
-- Default: Uses today's date automatically (e.g., JAN15)
-- Multiple sessions per day: Add suffix like `JAN15AM`, `JAN15PM`
-- Custom codes: Use memorable names like `KUBECON`, `MEETUP1`
-- Each session stores data separately in S3
-- You can review and pick winners anytime after the session
-
 At **T+25 minutes**, switch to survey mode:
 
 ```bash
-# Uses today's date as session code (e.g., JAN15)
 make enable-survey
-
-# Or specify custom session code for multiple sessions per day
-make enable-survey SESSION=JAN15PM
 ```
 
-This flips the app to survey mode. At **T+28 minutes**, pick winners:
+This automatically archives any previous session data and switches the app to survey mode. At **T+28 minutes**, pick winners:
 
 ```bash
-# Uses today's date as session code
 make pick-winners
-
-# Or specify the same custom session code
-make pick-winners SESSION=JAN15PM
 ```
 
 ### Restarting the Demo
 
-To restart the demo back to quiz mode (for a new session or to reset):
+To restart the demo back to quiz mode (for a new session):
 
 ```bash
-# Restart with a new session (uses today's date by default)
 make restart-demo
-
-# Or specify a custom session code
-make restart-demo SESSION=JAN15PM2
 ```
 
-This switches the app back to quiz mode and clears the current session state. Previous session data remains in S3.
+This switches the app back to quiz mode. When you enable survey mode again, the previous session will be automatically archived.
 
 ### Cleanup
 
@@ -182,31 +138,19 @@ When completely done:
 make teardown
 ```
 
-**Note:** The teardown process does NOT delete S3 buckets containing survey responses. Your data is safe and organized by session code for future analysis.
+**Note:** The teardown process does NOT delete S3 buckets containing survey responses. Your data is safe with versioning enabled and archived sessions are preserved.
 
 ### Analyzing Survey Responses
 
-Export responses from any session:
+Survey responses are stored in S3 with versioning enabled:
+- `current/responses/` - Active session submissions
+- `current/winners.json` - Winner announcements
+- `archive/<timestamp>/` - Previous sessions (auto-archived when starting new session)
 
-```bash
-# List all available sessions
-./scripts/export-responses.sh
-
-# Export specific session
-./scripts/export-responses.sh JAN15
-./scripts/export-responses.sh JAN15PM
-
-# Export to custom directory
-./scripts/export-responses.sh JAN15 ./my-analysis
-```
-
-Responses are organized in S3 by session code:
-- `<SESSION_CODE>/responses/` - All survey submissions
-- `<SESSION_CODE>/winners.json` - Winner announcements
-
-Each response includes: rating, company, feedback, timestamp, and session code.
+Each response includes: rating, company, feedback, and timestamp.
 
 ## Architecture at a Glance
+
 
 ```
                     ┌─────────────────────────────────────┐
