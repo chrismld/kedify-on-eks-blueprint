@@ -37,15 +37,38 @@ cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 # 3. Deploy infrastructure
 make setup-infra
 
-# 4. Build and push container images
+# 4. Configure kubectl to connect to the cluster
+aws eks update-kubeconfig --name kedify-on-eks-blueprint --region eu-west-1
+
+# 5. Build and push container images
 make build-push-images
 
-# 5. Deploy applications
+# 6. Deploy applications (creates internal ALB)
 make deploy-apps
 
-# 6. Verify everything is running
+# 7. Wait for ALB to be ready (2-3 minutes)
+kubectl get ingress frontend -n default -w
+# Press Ctrl+C once you see ADDRESS
+
+# 8. Setup CloudFront VPC Origin (automated, takes ~15 minutes)
+bash scripts/setup-vpc-origin.sh
+
+# 9. Setup CloudFront distribution
+make setup-cloudfront
+
+# 10. Verify everything is running
 kubectl get pods -A
 kubectl get nodes
+```
+
+### Get Frontend URL
+
+```bash
+# Get the frontend URL (CloudFront if configured, otherwise ALB)
+make get-frontend-url
+
+# Generate QR code for audience
+make generate-qr
 ```
 
 ### Run the 30-Minute Demo
@@ -94,6 +117,11 @@ make teardown
                     └──────────────┬──────────────────────┘
                                    │
                     ┌──────────────▼──────────────┐
+                    │   CloudFront (optional)     │
+                    │   Global CDN + DDoS         │
+                    └──────────────┬──────────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
                     │   Frontend (Next.js static) │
                     │   API Gateway (FastAPI)     │
                     └──────────────┬──────────────┘
@@ -121,16 +149,18 @@ make teardown
 - **Karpenter**: Manages GPU Spot nodes with disruption budgets
 - **OpenTelemetry**: 5-second scrape interval with in-memory TSDB
 - **Kedify OTEL Add-on**: Real-time metric collection and scaling
-- **AWS ALB**: Internet-facing Application Load Balancer for frontend access
+- **CloudFront + Internal ALB**: Secure frontend access without public load balancer exposure
+
+
 
 ## Files & Structure
 
 ```
-├── terraform/              EKS cluster, Karpenter controller, KEDA, OTEL scaler
+├── terraform/              EKS cluster, Karpenter, KEDA, OTEL scaler, CloudFront
 ├── app/                    FastAPI gateway + React frontend
 ├── kubernetes/             K8s manifests (vLLM, KEDA, Karpenter NodePools)
 ├── scripts/                Demo automation (run, enable survey, pick winners)
-├── docs/                   Extended documentation
+├── docs/                   Extended documentation (includes CLOUDFRONT-SETUP.md)
 └── Makefile                One-command setup, build, deploy, demo, cleanup
 ```
 

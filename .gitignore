@@ -54,3 +54,4 @@ ENV/
 
 # Scripts output
 setup-env.sh
+sync-to-server.sh

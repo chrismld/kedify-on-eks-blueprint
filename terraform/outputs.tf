@@ -1,11 +1,24 @@
-output "region" {
-  description = "AWS region"
-  value       = var.region
+output "configure_kubectl" {
+  description = "Configure kubectl command"
+  value       = "aws eks --region ${var.region} update-kubeconfig --name ${module.eks.cluster_name}"
 }
 
-output "account_id" {
-  description = "AWS Account ID"
-  value       = data.aws_caller_identity.current.account_id
+output "cluster_name" {
+  description = "EKS cluster name"
+  value       = module.eks.cluster_name
 }
 
-data "aws_caller_identity" "current" {}
+output "vpc_id" {
+  description = "VPC ID"
+  value       = module.vpc.vpc_id
+}
+
+output "cloudfront_url" {
+  description = "CloudFront URL for accessing the frontend"
+  value       = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+}
+
+output "internal_alb_dns" {
+  description = "Internal ALB DNS name"
+  value       = data.aws_lb.frontend_alb.dns_name
+}

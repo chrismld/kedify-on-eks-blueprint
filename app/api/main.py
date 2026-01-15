@@ -23,11 +23,42 @@ app.add_middleware(
 DEMO_MODE = os.getenv("DEMO_MODE", "quiz")
 VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm:8000")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-1")
-RESPONSES_BUCKET = "ai-workloads-tube-demo-responses"
-QUESTIONS_BUCKET = "ai-workloads-tube-demo-questions"
+
+# Get AWS account ID for unique bucket names
+try:
+    sts_client = boto3.client("sts", region_name=AWS_REGION)
+    AWS_ACCOUNT = sts_client.get_caller_identity()["Account"]
+except Exception:
+    AWS_ACCOUNT = "default"
+
+RESPONSES_BUCKET = f"ai-workloads-tube-demo-responses-{AWS_ACCOUNT}"
+QUESTIONS_BUCKET = f"ai-workloads-tube-demo-questions-{AWS_ACCOUNT}"
 
 try:
     s3_client = boto3.client("s3", region_name=AWS_REGION)
+    # Ensure buckets exist
+    for bucket in [RESPONSES_BUCKET, QUESTIONS_BUCKET]:
+        try:
+            s3_client.head_bucket(Bucket=bucket)
+        except:
+            try:
+                s3_client.create_bucket(
+                    Bucket=bucket,
+                    CreateBucketConfiguration={"LocationConstraint": AWS_REGION}
+                )
+                # Block public access
+                s3_client.put_public_access_block(
+                    Bucket=bucket,
+                    PublicAccessBlockConfiguration={
+                        "BlockPublicAcls": True,
+                        "IgnorePublicAcls": True,
+                        "BlockPublicPolicy": True,
+                        "RestrictPublicBuckets": True
+                    }
+                )
+                print(f"Created bucket: {bucket}")
+            except Exception as e:
+                print(f"Could not create bucket {bucket}: {e}")
 except Exception:
     s3_client = None
 
@@ -41,27 +72,58 @@ stats_cache = {
     "scaling": False
 }
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
     return {"status": "ok"}
 
-@app.get("/config")
+@app.get("/api/config")
 async def get_config():
     """Frontend polls this to detect mode"""
     return {"mode": DEMO_MODE}
 
 @app.post("/api/question/submit")
 async def submit_question(data: dict):
-    """Store audience question"""
+    """Store audience question and get LLM response"""
     question = data.get("question", "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
     
     question_id = f"question_{int(datetime.now().timestamp() * 1000)}"
+    
+    # Get answer from vLLM
+    answer = "Processing your question..."
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{VLLM_ENDPOINT}/v1/chat/completions",
+                json={
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a cheeky London Underground expert with a brilliant sense of humor. Answer questions about the Tube with wit, charm, and fascinating facts. Keep responses under 100 words. Throw in some British slang when appropriate, but stay respectful and helpful. Think of yourself as a friendly conductor who loves a good laugh!"
+                        },
+                        {
+                            "role": "user",
+                            "content": question
+                        }
+                    ],
+                    "max_tokens": 150,
+                    "temperature": 0.8
+                }
+            )
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0:
+                answer = result["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"vLLM error: {e}")
+        answer = "Blimey! The AI is having a bit of a moment. Your question is queued though! 🚇"
+    
     question_data = {
         "id": question_id,
         "timestamp": datetime.now().isoformat(),
         "question": question,
+        "answer": answer,
         "multiplier": 50
     }
     
@@ -80,7 +142,7 @@ async def submit_question(data: dict):
     questions_store.append(question_data)
     stats_cache["totalQuestions"] = len(questions_store)
     
-    return {"id": question_id, "status": "submitted"}
+    return {"id": question_id, "status": "submitted", "answer": answer}
 
 @app.get("/api/stats")
 async def get_stats():

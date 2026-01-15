@@ -6,6 +6,7 @@ export default function Home() {
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  const [answer, setAnswer] = useState('')
   const [stats, setStats] = useState(null)
 
   useEffect(() => {
@@ -44,9 +45,10 @@ export default function Home() {
     
     setLoading(true)
     try {
-      await axios.post('/api/question/submit', {
+      const res = await axios.post('/api/question/submit', {
         question: question.trim()
       })
+      setAnswer(res.data.answer || 'Answer coming soon!')
       setSubmitted(true)
     } catch (e) {
       console.error(e)
@@ -64,6 +66,14 @@ export default function Home() {
       <div className="success-container">
         <div className="success-card">
           <h1>✅ Question Submitted!</h1>
+          
+          {answer && (
+            <div className="answer-box">
+              <h3>🚇 Your Answer:</h3>
+              <p className="answer-text">{answer}</p>
+            </div>
+          )}
+          
           <p className="thanks-message">
             Thanks! Your question is now powering the demo! 🚇
           </p>

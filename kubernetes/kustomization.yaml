@@ -12,5 +12,4 @@ resources:
 - vllm/deployment.yaml
 - api/deployment.yaml
 - frontend/deployment.yaml
-# Ingress removed - not exposing publicly
-# - frontend/ingress.yaml
+- frontend/ingress.yaml

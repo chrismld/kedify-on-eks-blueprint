@@ -1,20 +1,33 @@
 #!/bin/bash
+set -e
 
 echo "🔍 Getting frontend URL..."
 
-FRONTEND_URL=$(kubectl get ingress frontend -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+# Check if CloudFront is configured
+CLOUDFRONT_URL=$(cd terraform && terraform output -raw cloudfront_url 2>/dev/null || echo "")
 
-if [ -z "$FRONTEND_URL" ]; then
-  echo "⚠️  ALB not ready yet. Checking ingress status..."
-  kubectl get ingress frontend -n default
+if [ -n "$CLOUDFRONT_URL" ] && [ "$CLOUDFRONT_URL" != "" ]; then
   echo ""
-  echo "Wait a few minutes for the ALB to provision, then run this script again."
+  echo "✅ CloudFront URL: $CLOUDFRONT_URL"
+  echo ""
+  echo "💡 Using CloudFront distribution (secure, global CDN)"
+  echo "📱 Generate QR code with: make generate-qr"
+  echo ""
+  exit 0
+fi
+
+# Fallback to ALB if CloudFront not configured
+INGRESS_URL=$(kubectl get ingress frontend -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+
+if [ -z "$INGRESS_URL" ]; then
+  echo "❌ Frontend ingress not found or ALB not ready yet"
+  echo "   Run 'kubectl get ingress -n default' to check status"
   exit 1
 fi
 
 echo ""
-echo "✅ Frontend is available at:"
-echo "   http://$FRONTEND_URL"
+echo "✅ Frontend ALB URL: http://$INGRESS_URL"
 echo ""
-echo "📋 You can also get the URL with:"
-echo "   kubectl get ingress frontend -n default"
+echo "💡 For secure public access, run: make setup-cloudfront"
+echo "📱 Generate QR code with: make generate-qr"
+echo ""

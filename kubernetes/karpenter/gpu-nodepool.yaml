@@ -6,7 +6,7 @@ spec:
   template:
     metadata:
       labels:
-        workload: inference
+        intent: gpu-inference
     spec:
       requirements:
       - key: kubernetes.io/arch
@@ -24,6 +24,9 @@ spec:
       - key: karpenter.k8s.aws/instance-size
         operator: In
         values: ["2xlarge", "4xlarge", "12xlarge"]
+      taints:
+      - key: nvidia.com/gpu
+        effect: NoSchedule
       nodeClassRef:
         group: karpenter.k8s.aws
         kind: EC2NodeClass

@@ -1,4 +1,4 @@
-.PHONY: setup-infra build-push-images deploy-apps run-demo dashboard enable-survey pick-winners teardown get-frontend-url generate-qr help
+.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard enable-survey pick-winners teardown get-frontend-url generate-qr help
 
 # Ensure /usr/local/bin is in PATH for kubectl and aws
 export PATH := $(PATH):/usr/local/bin
@@ -9,7 +9,8 @@ help:
 	@echo "  make setup-infra         Create EKS cluster, Karpenter (KEDA disabled)"
 	@echo "  make build-push-images   Build multi-arch images and push to ECR"
 	@echo "  make deploy-apps         Deploy vLLM, API, frontend (no KEDA)"
-	@echo "  make get-frontend-url    Get the frontend ALB URL"
+	@echo "  make setup-cloudfront    Configure CloudFront with internal ALB (optional)"
+	@echo "  make get-frontend-url    Get the frontend URL (ALB or CloudFront)"
 	@echo "  make generate-qr         Generate QR code for audience"
 	@echo "  make run-demo            Start k6 load gen and terminal dashboard"
 	@echo "  make dashboard           Start terminal dashboard only"
@@ -23,7 +24,24 @@ help:
 setup-infra:
 	@echo "📦 Setting up EKS infrastructure..."
 	cd terraform && terraform init
-	cd terraform && terraform apply -auto-approve
+	cd terraform && terraform apply \
+		-target=module.vpc \
+		-target=module.eks \
+		-target=module.aws_ebs_csi_pod_identity \
+		-target=kubernetes_storage_class_v1.gp3 \
+		-target=aws_iam_role.aws_load_balancer_controller \
+		-target=aws_iam_policy.aws_load_balancer_controller \
+		-target=aws_iam_role_policy_attachment.aws_load_balancer_controller \
+		-target=helm_release.aws_load_balancer_controller \
+		-target=helm_release.metrics_server \
+		-target=module.karpenter \
+		-target=helm_release.karpenter \
+		-target=kubectl_manifest.karpenter_node_class \
+		-target=kubectl_manifest.karpenter_node_pool \
+		-target=aws_ecr_repository.api \
+		-target=aws_ecr_repository.frontend \
+		-target=aws_ecr_repository.vllm \
+		-auto-approve
 
 build-push-images:
 	@echo "🔨 Building and pushing images..."
@@ -32,6 +50,26 @@ build-push-images:
 deploy-apps:
 	@echo "🚀 Deploying applications..."
 	kubectl apply -k kubernetes/
+
+setup-cloudfront:
+	@echo "☁️  Setting up CloudFront with VPC Origin..."
+	@if ! grep -q "cloudfront_vpc_origin_id" terraform/terraform.tfvars || grep -q '^# cloudfront_vpc_origin_id' terraform/terraform.tfvars; then \
+		echo "❌ Error: VPC Origin ID not set in terraform.tfvars"; \
+		echo "   Run: bash scripts/setup-vpc-origin.sh first"; \
+		exit 1; \
+	fi
+	cd terraform && terraform apply \
+		-target=aws_cloudfront_cache_policy.frontend \
+		-target=aws_cloudfront_origin_request_policy.frontend \
+		-target=aws_cloudfront_distribution.frontend \
+		-target=aws_wafv2_web_acl.cloudfront \
+		-auto-approve
+	@echo "✅ CloudFront setup complete!"
+	@echo ""
+	@echo "📋 CloudFront URL:"
+	@cd terraform && terraform output cloudfront_url
+	@echo ""
+	@echo "💡 Your internal ALB is now accessible via CloudFront"
 
 get-frontend-url:
 	@echo "🔍 Getting frontend URL..."

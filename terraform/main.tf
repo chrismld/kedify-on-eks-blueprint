@@ -2,6 +2,11 @@ provider "aws" {
   region = var.region
 }
 
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+}
+
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
   cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
@@ -180,23 +185,4 @@ module "vpc" {
   }
 
   tags = local.tags
-}
-
-################################################################################
-# Outputs
-################################################################################
-
-output "configure_kubectl" {
-  description = "Configure kubectl command"
-  value       = "aws eks --region ${var.region} update-kubeconfig --name ${module.eks.cluster_name}"
-}
-
-output "cluster_name" {
-  description = "EKS cluster name"
-  value       = module.eks.cluster_name
-}
-
-output "vpc_id" {
-  description = "VPC ID"
-  value       = module.vpc.vpc_id
 }

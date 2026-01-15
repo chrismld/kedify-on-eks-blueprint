@@ -14,7 +14,11 @@ spec:
         app: vllm
     spec:
       nodeSelector:
-        workload: inference
+        intent: gpu-inference
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
       containers:
       - name: vllm
         image: vllm/vllm-openai:latest
