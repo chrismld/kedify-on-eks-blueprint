@@ -20,6 +20,7 @@ kubernetes/frontend/deployment.yaml
 # Environment
 .env
 .env.local
+.demo-config
 *.pem
 *.key
 
@@ -59,3 +60,5 @@ ENV/
 # Scripts output
 setup-env.sh
 sync-to-server.sh
+
+demo-config

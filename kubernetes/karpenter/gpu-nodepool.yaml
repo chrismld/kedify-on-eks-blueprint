@@ -9,6 +9,9 @@ spec:
         intent: gpu-inference
     spec:
       requirements:
+      - key: intent
+        operator: In
+        values: ["gpu-inference"]
       - key: kubernetes.io/arch
         operator: In
         values: ["amd64"]
@@ -18,7 +21,7 @@ spec:
       - key: karpenter.sh/capacity-type
         operator: In
         values: ["spot"]
-      - key: karpenter.k8s.aws/instance-family
+      - key: karpenter.k8s.aws/instance-category
         operator: In
         values: ["p","g"]
       taints:

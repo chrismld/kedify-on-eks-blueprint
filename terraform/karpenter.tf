@@ -84,6 +84,9 @@ resource "kubectl_manifest" "karpenter_default_nodepool" {
             intent: apps
         spec:
           requirements:
+          - key: intent
+            operator: In
+            values: ["apps"]
           - key: kubernetes.io/arch
             operator: In
             values: ["amd64","arm64"]
