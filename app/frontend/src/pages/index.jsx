@@ -25,8 +25,7 @@ export default function Home() {
         if (res.data.sessionTimestamp) {
           const savedSessionTimestamp = localStorage.getItem('surveySessionTimestamp')
           if (savedSessionTimestamp && parseInt(savedSessionTimestamp) !== res.data.sessionTimestamp) {
-            // New session detected, clear old response
-            localStorage.removeItem('surveyResponseId')
+            // New session detected, update timestamp (response ID will be ignored by the check above)
             localStorage.setItem('surveySessionTimestamp', res.data.sessionTimestamp.toString())
           } else if (!savedSessionTimestamp) {
             // First time seeing this session
@@ -92,7 +91,7 @@ export default function Home() {
 
   if (mode === 'loading') return <div className="loader">Loading...</div>
   if (mode === 'survey') {
-    return <SurveyPage winnersPicked={winnersPicked} />
+    return <SurveyPage winnersPicked={winnersPicked} sessionTimestamp={sessionTimestamp} />
   }
 
   if (submitted) {
@@ -262,7 +261,7 @@ function SessionClosedPage() {
   )
 }
 
-function SurveyPage({ winnersPicked }) {
+function SurveyPage({ winnersPicked, sessionTimestamp }) {
   const [rating, setRating] = useState(5)
   const [company, setCompany] = useState('')
   const [feedback, setFeedback] = useState('')
@@ -270,14 +269,20 @@ function SurveyPage({ winnersPicked }) {
   const [isWinner, setIsWinner] = useState(false)
   const [responseId, setResponseId] = useState(null)
 
-  // Check if already submitted
+  // Check if already submitted for current session
   useEffect(() => {
-    const savedResponseId = localStorage.getItem('surveyResponseId')
-    if (savedResponseId) {
-      setSubmitted(true)
-      setResponseId(savedResponseId)
+    const savedSessionTimestamp = localStorage.getItem('surveySessionTimestamp')
+    const currentSessionTimestamp = sessionTimestamp?.toString()
+    
+    // Only consider submitted if it's for the current session
+    if (savedSessionTimestamp && currentSessionTimestamp && savedSessionTimestamp === currentSessionTimestamp) {
+      const savedResponseId = localStorage.getItem('surveyResponseId')
+      if (savedResponseId) {
+        setSubmitted(true)
+        setResponseId(savedResponseId)
+      }
     }
-  }, [])
+  }, [sessionTimestamp])
 
   useEffect(() => {
     if (responseId) {
