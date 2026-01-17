@@ -50,22 +50,22 @@ spec:
             limits:
               nvidia.com/gpu: 1
           
-          # Point to pre-populated model cache
+          # Point to pre-populated model cache on Bottlerocket data volume
           env:
             - name: HUGGINGFACE_HUB_CACHE
-              value: /mnt/models/hf-cache
+              value: /mnt/models/model-cache
             - name: HF_HOME
-              value: /mnt/models/hf-cache
+              value: /mnt/models/model-cache
           
           volumeMounts:
             - name: model-storage
               mountPath: /mnt/models
       
-      # Mount model volume from node
+      # Mount Bottlerocket data volume (/local on host = /dev/xvdb from snapshot)
       volumes:
         - name: model-storage
           hostPath:
-            path: /mnt/models
+            path: /local
             type: Directory
 
 ---
