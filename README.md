@@ -22,6 +22,20 @@ This is a **production-grade demo** of:
 - **Docker** with buildx (for multi-arch builds)
 - **k6** (load testing, install via `brew install k6` or `go install github.com/grafana/k6@latest`)
 - **jq** for JSON processing
+- **git** for cloning dependencies
+
+### vLLM Optimization (Optional but Recommended)
+
+This project includes an optimization that reduces vLLM pod startup time from **14 minutes to 30-60 seconds** by pre-caching the Mistral 7B model in an EBS snapshot.
+
+**For new setups:** The optimization runs automatically during `make setup-infra` (adds ~25-30 minutes to first-time setup)
+
+**For existing clusters:** Run `make optimize-vllm` to build and deploy the optimization
+
+**Benefits:**
+- Uses standard Bottlerocket AMI (AWS-maintained, stays current)
+- Only customizes the data volume snapshot
+- Works with Karpenter's instance diversification
 
 ### Configuration
 
@@ -50,8 +64,11 @@ cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 #   - project_name: Your project name (default: tube-demo)
 #   - eks_version, karpenter_version as needed
 
-# 3. Deploy infrastructure
+# 3. Deploy infrastructure (includes vLLM optimization on first run)
 make setup-infra
+# Note: First run builds EBS snapshot with model pre-cached (~25-30 min extra)
+# Subsequent runs reuse the snapshot and are much faster
+# Uses standard Bottlerocket AMI + custom data volume snapshot
 
 # 4. Configure kubectl to connect to the cluster
 aws eks update-kubeconfig --name kedify-on-eks-blueprint --region $(cd terraform && terraform output -raw region)

@@ -1,4 +1,4 @@
-.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard restart-demo enable-survey pick-winners teardown get-frontend-url generate-qr help
+.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard restart-demo enable-survey pick-winners teardown get-frontend-url generate-qr optimize-vllm help
 
 # Ensure /usr/local/bin is in PATH for kubectl and aws
 export PATH := $(PATH):/usr/local/bin
@@ -9,6 +9,7 @@ help:
 	@echo "  make setup-infra         Create EKS cluster, Karpenter (KEDA disabled)"
 	@echo "  make build-push-images   Build multi-arch images and push to ECR"
 	@echo "  make deploy-apps         Deploy vLLM, API, frontend (no KEDA)"
+	@echo "  make optimize-vllm       Build custom AMI and deploy optimized vLLM (existing cluster)"
 	@echo "  make setup-cloudfront    Configure CloudFront with internal ALB (optional)"
 	@echo "  make get-frontend-url    Get the frontend URL (ALB or CloudFront)"
 	@echo "  make generate-qr         Generate QR code for audience"
@@ -24,6 +25,11 @@ help:
 
 setup-infra:
 	@echo "📦 Setting up EKS infrastructure..."
+	@echo ""
+	@echo "Note: vLLM optimization (snapshot creation) will be done separately"
+	@echo "Run 'make optimize-vllm' after infrastructure is ready"
+	@echo ""
+	@echo "Deploying Terraform infrastructure..."
 	cd terraform && terraform init
 	cd terraform && terraform apply \
 		-target=module.vpc \
@@ -100,6 +106,28 @@ enable-survey:
 pick-winners:
 	@echo "🎁 Drawing winners..."
 	bash scripts/pick-winners.sh
+
+optimize-vllm:
+	@echo "⚡ Optimizing vLLM deployment..."
+	@echo ""
+	@echo "This will:"
+	@echo "  1. Build custom AMI with Mistral 7B model pre-cached (~25-30 min)"
+	@echo "  2. Deploy optimized GPU NodeClass"
+	@echo "  3. Redeploy vLLM pods"
+	@echo ""
+	@read -p "Continue? (y/N): " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		bash scripts/setup-snapshot.sh && \
+		kubectl apply -f kubernetes/karpenter/gpu-nodeclass.yaml && \
+		kubectl apply -f kubernetes/karpenter/gpu-nodepool.yaml && \
+		kubectl rollout restart deployment/vllm && \
+		echo "" && \
+		echo "✅ Optimization deployed!" && \
+		echo "" && \
+		echo "Expected pod startup time: 30-60 seconds (vs 14 minutes)" && \
+		echo "Test with: kubectl scale deployment vllm --replicas=5"; \
+	fi
 
 teardown:
 	@echo "💥 Destroying everything..."

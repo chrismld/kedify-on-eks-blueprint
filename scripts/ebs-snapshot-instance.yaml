@@ -1,0 +1,85 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: 2010-09-09
+Description: Bottlerocket instance to snapshot data volume with vLLM model pre-cached.
+
+Parameters:
+  AmiID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: "The ID of the AMI."
+    Default: /aws/service/bottlerocket/aws-k8s-1.30/x86_64/latest/image_id
+  InstanceType:
+    Type: String
+    Description: "EC2 instance type to launch"
+    Default: m5.large
+  SnapshotSize:
+    Type: Number
+    Description: "Size of the target snapshot in GiB"
+    Default: 150
+
+Resources:
+  InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "ec2.${AWS::URLSuffix}"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref InstanceRole
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiID
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+        EbsOptimized: true
+        UserData:
+          Fn::Base64: |
+            [settings.host-containers.admin]
+            enabled = true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 10
+              VolumeType: gp3
+              DeleteOnTermination: true
+          - DeviceName: /dev/xvdb
+            Ebs:
+              VolumeSize: !Ref SnapshotSize
+              VolumeType: gp3
+              Throughput: 1000
+              Iops: 4000
+              DeleteOnTermination: true
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeviceIndex: "0"
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+    Description: Instance Id

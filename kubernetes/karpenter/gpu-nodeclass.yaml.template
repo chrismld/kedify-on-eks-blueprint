@@ -33,7 +33,7 @@ spec:
         throughput: 125
         deleteOnTermination: false
         encrypted: true
-        snapshotId: snap-09ae5793730d0cbdc
+        snapshotId: snap-0YOUR_SNAPSHOT_ID
   
   # Mount model on boot
   userData: |
