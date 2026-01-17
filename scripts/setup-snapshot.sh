@@ -9,7 +9,6 @@ SCRIPTPATH=$(dirname "$0")
 
 # Configuration
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-$(aws ec2 describe-availability-zones --output text --query 'AvailabilityZones[0].[RegionName]')}
-AMI_ID=${AMI_ID:-/aws/service/bottlerocket/aws-k8s-1.30/x86_64/latest/image_id}
 INSTANCE_TYPE=${INSTANCE_TYPE:-m5.large}
 SNAPSHOT_SIZE=${SNAPSHOT_SIZE:-150}
 VLLM_IMAGE="docker.io/vllm/vllm-openai:latest"
@@ -17,6 +16,54 @@ MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.2"
 
 export AWS_DEFAULT_REGION
 export AWS_PAGER=""
+
+# Detect latest Bottlerocket version for EKS
+detect_bottlerocket_version() {
+    log "Detecting latest Bottlerocket version..."
+    # Query SSM for available Bottlerocket versions and get the latest k8s version
+    local latest_k8s=$(aws ssm get-parameters-by-path \
+        --path "/aws/service/bottlerocket/aws-k8s-" \
+        --query "Parameters[*].Name" --output text 2>/dev/null | \
+        tr '\t' '\n' | grep -oE 'aws-k8s-[0-9]+\.[0-9]+' | sort -V | uniq | tail -1)
+    
+    if [ -z "$latest_k8s" ]; then
+        log "Warning: Could not detect Bottlerocket version, using default 1.32"
+        echo "1.32"
+        return
+    fi
+    
+    local version=$(echo "$latest_k8s" | grep -oE '[0-9]+\.[0-9]+')
+    log "Detected Bottlerocket EKS version: $version"
+    echo "$version"
+}
+
+# Get Bottlerocket AMI version string (e.g., v1.28.0)
+get_bottlerocket_ami_version() {
+    local k8s_version=$1
+    local ami_id=$(aws ssm get-parameter \
+        --name "/aws/service/bottlerocket/aws-k8s-${k8s_version}/x86_64/latest/image_id" \
+        --query "Parameter.Value" --output text 2>/dev/null)
+    
+    if [ -z "$ami_id" ] || [ "$ami_id" = "None" ]; then
+        echo "latest"
+        return
+    fi
+    
+    # Get the AMI name which contains the version
+    local ami_name=$(aws ec2 describe-images --image-ids "$ami_id" \
+        --query "Images[0].Name" --output text 2>/dev/null)
+    
+    # Extract version like v1.28.0 from name like bottlerocket-aws-k8s-1.32-x86_64-v1.28.0-...
+    local br_version=$(echo "$ami_name" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    
+    if [ -z "$br_version" ]; then
+        echo "latest"
+    else
+        echo "$br_version"
+    fi
+}
+
+AMI_ID=${AMI_ID:-/aws/service/bottlerocket/aws-k8s-1.32/x86_64/latest/image_id}
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $*"
@@ -29,6 +76,19 @@ cleanup() {
     fi
 }
 
+# Generate nodeclass yaml with snapshot ID and Bottlerocket version
+generate_nodeclass() {
+    local snapshot_id=$1
+    local k8s_version=$(detect_bottlerocket_version)
+    local br_version=$(get_bottlerocket_ami_version "$k8s_version")
+    
+    log "Using Bottlerocket version: $br_version"
+    sed -e "s/snap-0YOUR_SNAPSHOT_ID/$snapshot_id/" \
+        -e "s/BR_VERSION_PLACEHOLDER/$br_version/" \
+        "$NODECLASS_TEMPLATE" > "$NODECLASS_OUTPUT"
+    log "Generated $NODECLASS_OUTPUT"
+}
+
 # Check for existing snapshot
 if [ -f "$SNAPSHOT_ID_FILE" ]; then
     SNAPSHOT_ID=$(cat "$SNAPSHOT_ID_FILE")
@@ -37,13 +97,11 @@ if [ -f "$SNAPSHOT_ID_FILE" ]; then
         read -p "Create new snapshot? (y/N): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            sed "s/snap-0YOUR_SNAPSHOT_ID/$SNAPSHOT_ID/" "$NODECLASS_TEMPLATE" > "$NODECLASS_OUTPUT"
-            log "Generated $NODECLASS_OUTPUT"
+            generate_nodeclass "$SNAPSHOT_ID"
             exit 0
         fi
     else
-        sed "s/snap-0YOUR_SNAPSHOT_ID/$SNAPSHOT_ID/" "$NODECLASS_TEMPLATE" > "$NODECLASS_OUTPUT"
-        log "Generated $NODECLASS_OUTPUT"
+        generate_nodeclass "$SNAPSHOT_ID"
         exit 0
     fi
 fi
@@ -161,7 +219,7 @@ rm -f /tmp/download-model.json
 
 # Save and generate output
 echo "$SNAPSHOT_ID" > "$SNAPSHOT_ID_FILE"
-sed "s/snap-0YOUR_SNAPSHOT_ID/$SNAPSHOT_ID/" "$NODECLASS_TEMPLATE" > "$NODECLASS_OUTPUT"
+generate_nodeclass "$SNAPSHOT_ID"
 
 log "Done! Snapshot: $SNAPSHOT_ID"
 log "Generated: $NODECLASS_OUTPUT"

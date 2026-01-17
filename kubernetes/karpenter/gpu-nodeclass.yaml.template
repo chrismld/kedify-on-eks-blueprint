@@ -5,9 +5,9 @@ metadata:
 spec:
   role: "kedify-on-eks-blueprint"
   
-  # Use standard Bottlerocket AMI (AWS-maintained)
+  # Use Bottlerocket AMI
   amiSelectorTerms:
-    - alias: "bottlerocket@1.30.0"
+    - alias: "bottlerocket@BR_VERSION_PLACEHOLDER"
   
   subnetSelectorTerms:
     - tags:
@@ -24,7 +24,7 @@ spec:
         volumeType: gp3
         deleteOnTermination: true
     
-    # ⭐ Data volume with model pre-cached (from snapshot)
+    # Data volume with model pre-cached (from snapshot)
     - deviceName: /dev/xvdb
       ebs:
         volumeSize: 150Gi
@@ -33,13 +33,12 @@ spec:
         throughput: 125
         deleteOnTermination: false
         encrypted: true
-        snapshotId: snap-0YOUR_SNAPSHOT_ID
+        snapshotID: snap-0YOUR_SNAPSHOT_ID
   
-  # Mount model on boot
+  # Bottlerocket uses TOML for userData
   userData: |
-    #!/bin/bash
-    mkdir -p /mnt/models
-    mount /dev/nvme1n1 /mnt/models || true
+    [settings.kubernetes]
+    allowed-unsafe-sysctls = ["net.core.somaxconn"]
   
   tags:
     Name: karpenter-gpu-optimized
