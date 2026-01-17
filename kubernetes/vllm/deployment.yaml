@@ -50,6 +50,24 @@ spec:
             limits:
               nvidia.com/gpu: 1
           
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
           # Point to pre-populated model cache on Bottlerocket data volume
           env:
             - name: HUGGINGFACE_HUB_CACHE
