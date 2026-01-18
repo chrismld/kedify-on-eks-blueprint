@@ -23,18 +23,21 @@ spec:
       
       containers:
         - name: vllm
-          image: vllm/vllm-openai:latest
+          image: vllm/vllm-openai:v0.13.0
+          imagePullPolicy: IfNotPresent
           args:
-            - "--model"
-            - "mistralai/Mistral-7B-Instruct-v0.2"
+            - "TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+            - "--quantization"
+            - "awq"
+            - "--max-model-len"
+            - "4096"
             - "--max-num-seqs"
-            - "16"
-            - "--tensor-parallel-size"
-            - "1"
+            - "8"
             - "--gpu-memory-utilization"
-            - "0.9"
-            - "--trust-remote-code"
-            - "--disable-log-requests"
+            - "0.90"
+            - "--enforce-eager"
+            - "--tokenizer-mode"
+            - "mistral"
           
           ports:
             - name: api
@@ -50,23 +53,6 @@ spec:
             limits:
               nvidia.com/gpu: 1
           
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
-          
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 45
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
           
           # Point to pre-populated model cache on Bottlerocket data volume
           env:

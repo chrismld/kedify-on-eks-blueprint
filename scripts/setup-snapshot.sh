@@ -11,8 +11,8 @@ SCRIPTPATH=$(dirname "$0")
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-$(aws ec2 describe-availability-zones --output text --query 'AvailabilityZones[0].[RegionName]')}
 INSTANCE_TYPE=${INSTANCE_TYPE:-m5.large}
 SNAPSHOT_SIZE=${SNAPSHOT_SIZE:-150}
-VLLM_IMAGE="docker.io/vllm/vllm-openai:latest"
-MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.2"
+VLLM_IMAGE="docker.io/vllm/vllm-openai:v0.13.0"
+MODEL_NAME="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
 
 export AWS_DEFAULT_REGION
 export AWS_PAGER=""
@@ -168,7 +168,7 @@ log "[5/7] Downloading model $MODEL_NAME (10-15 min)..."
 cat > /tmp/download-model.json << 'EOFCMD'
 {
   "commands": [
-    "apiclient exec admin sheltie ctr -a /run/containerd/containerd.sock -n k8s.io run --rm --net-host --env HF_HOME=/cache --mount type=bind,src=/local,dst=/cache,options=rbind docker.io/vllm/vllm-openai:latest model-dl python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(\"mistralai/Mistral-7B-Instruct-v0.2\", cache_dir=\"/cache/model-cache\")'"
+    "apiclient exec admin sheltie ctr -a /run/containerd/containerd.sock -n k8s.io run --rm --net-host --env HF_HOME=/cache --mount type=bind,src=/local,dst=/cache,options=rbind docker.io/vllm/vllm-openai:v0.13.0 model-dl python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(\"TheBloke/Mistral-7B-Instruct-v0.2-AWQ\", cache_dir=\"/cache/model-cache\")'"
   ]
 }
 EOFCMD

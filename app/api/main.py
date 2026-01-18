@@ -148,7 +148,7 @@ async def submit_question(data: dict):
             response = await client.post(
                 f"{VLLM_ENDPOINT}/v1/chat/completions",
                 json={
-                    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+                    "model": "TheBloke/Mistral-7B-Instruct-v0.2-AWQ",
                     "messages": [
                         {
                             "role": "system",
