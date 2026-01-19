@@ -119,7 +119,10 @@ spec:
           values: ["spot"]              # 70% cost savings
         - key: karpenter.k8s.aws/instance-category
           operator: In
-          values: ["g", "p"]            # GPU instance families
+          values: ["g", "p"]            # GPU instance categories
+        - key: karpenter.k8s.aws/instance-gpu-manufacturer
+          operator: In
+          values: ["nvidia"]            # NVIDIA GPUs only
       taints:
         - key: nvidia.com/gpu
           effect: NoSchedule            # Only GPU workloads here
@@ -273,7 +276,7 @@ This makes scaling visually dramatic for demos while keeping actual load managea
 
 ## Instance Type Selection
 
-Karpenter can choose from multiple GPU instance types. Here's how they compare for this workload:
+Karpenter can choose from multiple GPU instance types based on the NodePool requirements (`instance-category: g, p` + `instance-gpu-manufacturer: nvidia`). Here's how they compare for this workload:
 
 | Instance | GPU | VRAM | Cold Start | Best For |
 |----------|-----|------|------------|----------|
@@ -282,8 +285,11 @@ Karpenter can choose from multiple GPU instance types. Here's how they compare f
 | g5.xlarge | A10G | 24GB | ~18s | Faster inference |
 | g5.2xlarge | A10G | 24GB | ~18s | More headroom |
 | g6.xlarge | L4 | 24GB | ~22s | Power efficient |
+| p3.2xlarge | V100 | 16GB | ~20s | High memory BW |
+| p4d.24xlarge | A100 | 40GB | ~15s | Large models |
+| p5.48xlarge | H100 | 80GB | ~12s | Maximum performance |
 
-**Recommendation:** Start with g4dn for cost efficiency. Move to g5 if you need faster cold starts or larger models.
+**Recommendation:** Start with g4dn/g5 for cost efficiency. The `nvidia` GPU manufacturer filter ensures AMD GPUs (like g4ad) are excluded.
 
 ---
 

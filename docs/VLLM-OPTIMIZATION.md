@@ -189,6 +189,60 @@ Loading safetensors using Runai Model Streamer: 100% Completed
 
 ---
 
+## Real-World Scale Test: 0 → 5 Replicas
+
+We tested scaling from zero to 5 vLLM replicas to validate the architecture under realistic conditions. Here's what actually happened:
+
+### Timeline Breakdown
+
+| Phase | Duration | Details |
+|-------|----------|---------|
+| Karpenter NodeClaim creation | ~0s | 5 NodeClaims created simultaneously |
+| EC2 instance launch + join | ~38-48s | g4dn.2xlarge Spot instances |
+| Pod scheduling | ~3-6s | Immediate after nodes ready |
+| Container image pull | **~0s** | "already present on machine" ✓ |
+| Model streaming from EFS | ~5s | 3.9 GiB at **~750 MiB/s** |
+| Model load to GPU | ~44s | CPU → GPU transfer + initialization |
+| Engine init (KV cache, warmup) | ~38-40s | CUDA initialization |
+
+### End-to-End Results
+
+| Metric | Measured |
+|--------|----------|
+| Scale trigger → All 5 nodes Ready | **~48s** |
+| Scale trigger → All 5 pods serving | **~2 min** |
+| Instance type | g4dn.2xlarge (Spot) |
+| EFS throughput (5 concurrent readers) | **~750 MiB/s** |
+| Container image pull | Instant (EBS snapshot) |
+
+### Key Observations
+
+**EFS Elastic throughput delivered:** The 750 MiB/s throughput across 5 concurrent pods exceeded our initial estimates of 100-200 MiB/s. EFS Elastic mode automatically scaled to meet demand—no provisioning required.
+
+**EBS snapshot working perfectly:** All 5 pods reported "Container image already present on machine", confirming the snapshot-based image caching eliminated the 60-90s image pull overhead.
+
+**Parallel scaling:** Karpenter launched all 5 nodes in parallel, and EFS handled concurrent model reads without degradation. This is a key advantage over per-node EBS snapshots where each node would need its own copy.
+
+### Logs from the Scale Event
+
+```
+# Node provisioning (Karpenter)
+Normal  Nominated  Pod should schedule on: nodeclaim/gpu-inference-84gmg
+
+# Container image (instant - cached in EBS snapshot)
+Normal  Pulled     Container image "vllm/vllm-openai:v0.13.0" already present on machine
+
+# Model streaming from EFS
+Loading safetensors using Runai Model Streamer: 100% Completed | 739/739 [00:05<00:00, 142.54it/s]
+[RunAI Streamer] Overall time to stream 3.9 GiB of all files to cpu: 5.22s, 758.0 MiB/s
+Model loading took 3.8815 GiB memory and 44.310567 seconds
+
+# Ready to serve
+INFO: Application startup complete.
+```
+
+---
+
 ## Complete vLLM Deployment Configuration
 
 Here's the full deployment manifest with EFS storage:
@@ -314,8 +368,9 @@ Not all GPUs are created equal. Here's how different instance types affect cold 
 | **g5.xlarge** | A10G | 600 GB/s | ~1-1.5 min | **Best value** |
 | g5.2xlarge | A10G | 600 GB/s | ~1-1.5 min | More vCPU |
 | g6.xlarge | L4 | 300 GB/s | ~1.5-2 min | Power efficient |
+| p3.2xlarge | V100 | 900 GB/s | ~1-1.5 min | High memory BW |
 
-**Note:** With EFS storage, the bottleneck is network throughput, not GPU memory bandwidth. Instance type matters less than with local storage.
+**Note:** The NodePool uses `instance-gpu-manufacturer: nvidia` to exclude AMD GPUs (like g4ad). With EFS storage, the bottleneck is network throughput, not GPU memory bandwidth.
 
 ---
 
@@ -372,21 +427,23 @@ spec:
 
 ## What's Left on the Table?
 
-With EFS storage, the ~1-2 minute startup breaks down as:
+With EFS storage, the ~2 minute startup breaks down as (measured from 0→5 scale test):
 
 | Phase | Time | Bottleneck |
 |-------|------|------------|
-| EFS → CPU (model read) | ~60-90s | EFS throughput (~100-200 MB/s) |
-| CPU → GPU transfer | ~15s | PCIe bandwidth |
-| Engine initialization | ~4s | CUDA/vLLM overhead |
-| KV cache warmup | ~4s | GPU compute |
+| EC2 instance provisioning | ~40-48s | AWS EC2 launch time |
+| EFS → CPU (model stream) | ~5s | EFS Elastic (~750 MiB/s measured) |
+| CPU → GPU + model init | ~44s | PCIe + CUDA initialization |
+| KV cache + warmup | ~38-40s | GPU compute |
+
+**Surprising finding:** EFS Elastic throughput was much better than expected (~750 MiB/s vs estimated 100-200 MiB/s). The actual bottleneck is GPU initialization, not storage.
 
 **To go faster, you'd need:**
-- FSx for Lustre (~$150/mo) - reduces model read to ~10-20s
-- Keep pods warm (no scale-to-zero) - eliminates cold start entirely
-- EBS snapshot with model (loses scale-to-zero support)
+- FSx for Lustre (~$150/mo) - marginal improvement since EFS isn't the bottleneck
+- Keep pods warm (min replicas > 0) - eliminates cold start entirely
+- Faster GPU initialization (limited by vLLM/CUDA)
 
-For most use cases, ~1-2 minutes is acceptable for autoscaling scenarios.
+For most use cases, ~2 minutes for a full scale-from-zero event (including node provisioning) is excellent.
 
 ---
 
@@ -437,9 +494,10 @@ kubectl logs -f deploy/vllm
 - Check logs for "Loading safetensors using Runai Model Streamer"
 
 **Slow startup despite optimizations:**
-- EFS throughput is the bottleneck (~100-200 MB/s for Elastic mode)
-- Consider FSx for Lustre if you need faster cold starts
-- Or keep pods warm (min replicas > 0)
+- Check EFS throughput in logs: look for "MiB/s" in RunAI Streamer output
+- Expected: ~750 MiB/s with Elastic mode (measured in 0→5 scale test)
+- If significantly slower, check EFS mount target health and security groups
+- The main bottleneck is GPU initialization (~80s), not EFS
 
 ---
 
