@@ -6,11 +6,18 @@ echo "🔧 Updating Kubernetes manifests..."
 # Get values from AWS CLI / environment
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 AWS_REGION=${AWS_REGION:-$(aws configure get region)}
-PROJECT_NAME=${PROJECT_NAME:-"kedify-on-eks-blueprint"}
 
-# Get EFS filesystem ID by name tag
+# Auto-detect project name from ECR repositories if not set
+if [ -z "$PROJECT_NAME" ]; then
+  PROJECT_NAME=$(aws ecr describe-repositories \
+    --query "repositories[?contains(repositoryName, '/api')].repositoryName | [0]" \
+    --output text 2>/dev/null | cut -d'/' -f1)
+  [ "$PROJECT_NAME" = "None" ] || [ -z "$PROJECT_NAME" ] && PROJECT_NAME="kedify-on-eks-blueprint"
+fi
+
+# Get EFS filesystem ID - try multiple name patterns
 EFS_FILESYSTEM_ID=$(aws efs describe-file-systems \
-  --query "FileSystems[?Tags[?Key=='Name' && contains(Value, '${PROJECT_NAME}')]].FileSystemId | [0]" \
+  --query "FileSystems[?Tags[?Key=='Name' && contains(Value, 'models')]].FileSystemId | [0]" \
   --output text 2>/dev/null || echo "")
 [ "$EFS_FILESYSTEM_ID" = "None" ] && EFS_FILESYSTEM_ID=""
 
