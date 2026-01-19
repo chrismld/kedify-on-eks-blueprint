@@ -37,13 +37,12 @@ This guide documents the journey from 14 minutes to **~2 minutes**, with a focus
 
 | Concern | EBS Snapshot (per-node) | EFS (shared) |
 |---------|------------------------|--------------|
-| Scale-to-zero | Model lost when node terminates | Model persists ✓ |
+| Scale-to-zero | ❌ Model lost when node terminates | ✓ Model persists |
 | Model updates | Re-create snapshot, restart nodes | Re-run loader job ✓ |
 | Multi-pod | Each node needs snapshot | Shared storage ✓ |
-| Cold start | ~24s (from page cache) | ~1-2 min (network) |
 | Cost (5 nodes) | ~$70/mo (150GB × 5) | ~$15/mo (EFS + 50GB EBS) |
 
-We chose **EFS for model storage** because scale-to-zero support and operational simplicity outweigh the slightly slower cold starts.
+We chose **EFS for model storage** because it enables scale-to-zero—the model persists even when all nodes terminate. With EBS snapshots, the model is lost when nodes scale down, requiring a fresh download on scale-up.
 
 ---
 
@@ -174,12 +173,11 @@ Loading safetensors using Runai Model Streamer: 100% Completed
 
 ## Results Summary
 
-| Optimization Stage | Cold Start | Scale-to-Zero | Notes |
-|-------------------|------------|---------------|-------|
-| Baseline (HF download) | ~14 min | ❌ Re-downloads | Every pod restart |
-| EBS Snapshot (model on disk) | ~24s | ❌ Model lost | Fastest, but inflexible |
-| **EFS + Image Cache** | **~1-2 min** | **✓ Supported** | Best balance |
-| EFS only (no image cache) | ~2-3 min | ✓ Supported | Simplest setup |
+| Optimization Stage | Cold Start (0→N) | Scale-to-Zero | Notes |
+|-------------------|------------------|---------------|-------|
+| Baseline (HF download) | ~15 min | ❌ Re-downloads | Every pod restart |
+| **EFS + Image Cache** | **~2 min** | **✓ Supported** | Best balance |
+| EFS only (no image cache) | ~3-4 min | ✓ Supported | Simplest setup |
 
 **We chose EFS + Image Cache** because:
 - Scale-to-zero works (model persists in EFS)
@@ -335,13 +333,11 @@ spec:
 
 We evaluated several approaches for model storage:
 
-| Approach | Cold Start | Scale-to-Zero | Cost (5 nodes) | Complexity |
-|----------|------------|---------------|----------------|------------|
-| HuggingFace download | ~14 min | ✓ | $0 | Low |
-| EBS Snapshot (model) | ~24s | ❌ | ~$70/mo | Medium |
-| **EFS + EBS (images)** | **~1-2 min** | **✓** | **~$15/mo** | **Medium** |
-| FSx for Lustre | ~30s | ✓ | ~$150/mo | High |
-| S3 Express One Zone | ~45s | ✓ | ~$25/mo | Medium |
+| Approach | Cold Start (0→N) | Scale-to-Zero | Cost (5 nodes) | Complexity |
+|----------|------------------|---------------|----------------|------------|
+| HuggingFace download | ~15 min | ❌ Re-downloads | $0 | Low |
+| **EFS + EBS (images)** | **~2 min** | **✓** | **~$15/mo** | **Medium** |
+| FSx for Lustre | ~1.5 min | ✓ | ~$150/mo | High |
 
 **EFS won** because:
 - Scale-to-zero support (model persists when nodes terminate)
