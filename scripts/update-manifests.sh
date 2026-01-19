@@ -1,16 +1,18 @@
 #!/bin/bash
 set -e
 
-echo "🔧 Updating Kubernetes manifests with Terraform outputs..."
+echo "🔧 Updating Kubernetes manifests..."
 
-cd terraform
+# Get values from AWS CLI / environment
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_REGION=${AWS_REGION:-$(aws configure get region)}
+PROJECT_NAME=${PROJECT_NAME:-"kedify-on-eks-blueprint"}
 
-AWS_ACCOUNT_ID=$(terraform output -raw aws_account_id)
-AWS_REGION=$(terraform output -raw region)
-PROJECT_NAME=$(terraform output -raw project_name)
-EFS_FILESYSTEM_ID=$(terraform output -raw efs_filesystem_id 2>/dev/null || echo "")
-
-cd ..
+# Get EFS filesystem ID by name tag
+EFS_FILESYSTEM_ID=$(aws efs describe-file-systems \
+  --query "FileSystems[?Tags[?Key=='Name' && contains(Value, '${PROJECT_NAME}')]].FileSystemId | [0]" \
+  --output text 2>/dev/null || echo "")
+[ "$EFS_FILESYSTEM_ID" = "None" ] && EFS_FILESYSTEM_ID=""
 
 REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
@@ -21,6 +23,8 @@ echo "   Project: ${PROJECT_NAME}"
 echo "   Registry: ${REGISTRY}"
 if [ -n "$EFS_FILESYSTEM_ID" ]; then
   echo "   EFS: ${EFS_FILESYSTEM_ID}"
+else
+  echo "   EFS: (not found - kubernetes/efs/pv.yaml will not be generated)"
 fi
 echo ""
 
@@ -46,7 +50,7 @@ if [ -n "$EFS_FILESYSTEM_ID" ]; then
     kubernetes/efs/pv.yaml.template > kubernetes/efs/pv.yaml
 fi
 
-echo "✅ Manifests generated from templates!"
+echo ""
+echo "✅ Manifests generated!"
 echo ""
 echo "💡 You can now deploy with: make deploy-apps"
-
