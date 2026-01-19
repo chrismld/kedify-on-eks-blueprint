@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build EBS snapshot with vLLM image and Mistral 7B model pre-cached
+# Build EBS snapshot with vLLM container image pre-cached (for fast image pulls)
+# Model storage is handled separately via EFS
 set -e
 
 SNAPSHOT_ID_FILE=".snapshot-id"
@@ -10,9 +11,8 @@ SCRIPTPATH=$(dirname "$0")
 # Configuration
 AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-$(aws ec2 describe-availability-zones --output text --query 'AvailabilityZones[0].[RegionName]')}
 INSTANCE_TYPE=${INSTANCE_TYPE:-m5.large}
-SNAPSHOT_SIZE=${SNAPSHOT_SIZE:-150}
+SNAPSHOT_SIZE=${SNAPSHOT_SIZE:-50}  # Reduced: only storing container image, not model
 VLLM_IMAGE="docker.io/vllm/vllm-openai:v0.13.0"
-MODEL_NAME="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
 
 export AWS_DEFAULT_REGION
 export AWS_PAGER=""
@@ -162,50 +162,18 @@ while true; do
 done
 log "Image pulled"
 
-# [5/7] Download model DIRECTLY to /local (Bottlerocket's data volume)
-log "[5/7] Downloading model $MODEL_NAME..."
-
-cat > /tmp/download-model.json << 'EOF'
-{
-  "commands": [
-    "apiclient exec admin sheltie ctr -a /run/containerd/containerd.sock -n k8s.io run --rm --net-host --env HF_HOME=/models/model-cache --mount type=bind,src=/local,dst=/models,options=rbind docker.io/vllm/vllm-openai:v0.13.0 model-dl python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(\"TheBloke/Mistral-7B-Instruct-v0.2-AWQ\", cache_dir=\"/models/model-cache\")'"
-  ]
-}
-EOF
-
-CMDID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" \
-    --document-name "AWS-RunShellScript" --comment "Download model" \
-    --timeout-seconds 1800 \
-    --parameters file:///tmp/download-model.json \
-    --query "Command.CommandId" --output text)
-
-while true; do
-    STATUS=$(aws ssm get-command-invocation --command-id "$CMDID" --instance-id "$INSTANCE_ID" --query "Status" --output text 2>/dev/null || echo "Pending")
-    [[ "$STATUS" == "Success" ]] && break
-    if [[ "$STATUS" == "Failed" || "$STATUS" == "TimedOut" ]]; then
-        ERROR=$(aws ssm get-command-invocation --command-id "$CMDID" --instance-id "$INSTANCE_ID" --query "[StandardErrorContent,StandardOutputContent]" --output text 2>/dev/null)
-        log "ERROR: $ERROR"
-        cleanup "$CFN_STACK_NAME"
-        exit 1
-    fi
-    sleep 10
-done
-
-rm -f /tmp/download-model.json
-log "Model cached!"
-
 # Stop instance
-log "[6/7] Stopping instance..."
+log "[5/6] Stopping instance..."
 aws ec2 stop-instances --instance-ids "$INSTANCE_ID" > /dev/null
 aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID"
 
 # Create snapshot
-log "[7/7] Creating snapshot..."
+log "[6/6] Creating snapshot..."
 DATA_VOLUME_ID=$(aws ec2 describe-instances --instance-id "$INSTANCE_ID" \
     --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='/dev/xvdb'].Ebs.VolumeId" --output text)
 SNAPSHOT_ID=$(aws ec2 create-snapshot --volume-id "$DATA_VOLUME_ID" \
-    --tag-specifications 'ResourceType=snapshot,Tags=[{Key=Name,Value=vllm-mistral-7b}]' \
-    --description "vLLM with Mistral 7B pre-cached" \
+    --tag-specifications 'ResourceType=snapshot,Tags=[{Key=Name,Value=vllm-image-cache}]' \
+    --description "vLLM container image pre-cached" \
     --query "SnapshotId" --output text)
 
 until aws ec2 wait snapshot-completed --snapshot-ids "$SNAPSHOT_ID" &> /dev/null; do
@@ -215,7 +183,6 @@ log "Snapshot ready: $SNAPSHOT_ID"
 
 # Cleanup
 cleanup "$CFN_STACK_NAME"
-rm -f /tmp/download-model.json
 
 # Save and generate output
 echo "$SNAPSHOT_ID" > "$SNAPSHOT_ID_FILE"
@@ -223,3 +190,6 @@ generate_nodeclass "$SNAPSHOT_ID"
 
 log "Done! Snapshot: $SNAPSHOT_ID"
 log "Generated: $NODECLASS_OUTPUT"
+log ""
+log "Note: This snapshot contains only the vLLM container image."
+log "Model weights are stored in EFS and loaded via the model-loader Job."

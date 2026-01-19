@@ -69,32 +69,32 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_id   = "vpc-origin"
 
     vpc_origin_config {
-      vpc_origin_id                = var.cloudfront_vpc_origin_id
-      origin_keepalive_timeout     = 5
-      origin_read_timeout          = 30
+      vpc_origin_id            = var.cloudfront_vpc_origin_id
+      origin_keepalive_timeout = 5
+      origin_read_timeout      = 30
     }
   }
 
   default_cache_behavior {
-    allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-    cached_methods             = ["GET", "HEAD", "OPTIONS"]
-    target_origin_id           = "vpc-origin"
-    cache_policy_id            = aws_cloudfront_cache_policy.frontend.id
-    origin_request_policy_id   = aws_cloudfront_origin_request_policy.frontend.id
-    viewer_protocol_policy     = "redirect-to-https"
-    compress                   = true
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id         = "vpc-origin"
+    cache_policy_id          = aws_cloudfront_cache_policy.frontend.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.frontend.id
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
   }
 
   # API path should not be cached
   ordered_cache_behavior {
-    path_pattern               = "/api/*"
-    allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-    cached_methods             = ["GET", "HEAD"]
-    target_origin_id           = "vpc-origin"
-    viewer_protocol_policy     = "redirect-to-https"
-    compress                   = false
-    cache_policy_id            = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  # Managed-CachingDisabled
-    origin_request_policy_id   = "216adef6-5c7f-47e4-b989-5492eafa07d3"  # Managed-AllViewer
+    path_pattern             = "/api/*"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "vpc-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = false
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # Managed-CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # Managed-AllViewer
   }
 
   restrictions {

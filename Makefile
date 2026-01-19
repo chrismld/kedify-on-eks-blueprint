@@ -35,6 +35,10 @@ setup-infra:
 		-target=module.vpc \
 		-target=module.eks \
 		-target=module.aws_ebs_csi_pod_identity \
+		-target=module.aws_efs_csi_pod_identity \
+		-target=aws_efs_file_system.models \
+		-target=aws_security_group.efs \
+		-target=aws_efs_mount_target.models \
 		-target=kubernetes_storage_class_v1.gp3 \
 		-target=aws_iam_role.aws_load_balancer_controller \
 		-target=aws_iam_policy.aws_load_balancer_controller \
@@ -58,6 +62,20 @@ build-push-images:
 deploy-apps:
 	@echo "🚀 Deploying applications..."
 	kubectl apply -k kubernetes/
+	@echo ""
+	@echo "📦 Checking if model needs to be loaded to EFS..."
+	@if ! kubectl get job model-loader -o name 2>/dev/null | grep -q model-loader; then \
+		echo "🔄 Starting model loader job (first-time setup, ~3-5 min)..."; \
+		kubectl apply -f kubernetes/efs/model-loader-job.yaml; \
+		echo "⏳ Waiting for model download to complete..."; \
+		kubectl wait --for=condition=complete job/model-loader --timeout=600s || \
+			(echo "❌ Model loader failed. Check logs: kubectl logs job/model-loader" && exit 1); \
+		echo "✅ Model loaded to EFS!"; \
+	else \
+		echo "✅ Model already loaded (job exists)"; \
+	fi
+	@echo ""
+	@echo "🎉 Deployment complete!"
 
 setup-cloudfront:
 	@echo "☁️  Setting up CloudFront with VPC Origin..."
@@ -108,12 +126,15 @@ pick-winners:
 	bash scripts/pick-winners.sh
 
 optimize-vllm:
-	@echo "⚡ Optimizing vLLM deployment..."
+	@echo "⚡ Optimizing vLLM deployment (container image caching)..."
 	@echo ""
 	@echo "This will:"
-	@echo "  1. Build custom AMI with Mistral 7B model pre-cached (~25-30 min)"
+	@echo "  1. Build EBS snapshot with vLLM container image pre-cached (~10-15 min)"
 	@echo "  2. Deploy optimized GPU NodeClass"
 	@echo "  3. Redeploy vLLM pods"
+	@echo ""
+	@echo "Note: Model weights are stored in EFS (shared storage)."
+	@echo "      This snapshot only caches the container image for faster pulls."
 	@echo ""
 	@read -p "Continue? (y/N): " -n 1 -r; \
 	echo; \
@@ -125,7 +146,8 @@ optimize-vllm:
 		echo "" && \
 		echo "✅ Optimization deployed!" && \
 		echo "" && \
-		echo "Expected pod startup time: 30-60 seconds (vs 14 minutes)" && \
+		echo "Expected cold start: ~1-2 min (EFS model loading)" && \
+		echo "Container image pull: ~10s (from EBS cache)" && \
 		echo "Test with: kubectl scale deployment vllm --replicas=5"; \
 	fi
 

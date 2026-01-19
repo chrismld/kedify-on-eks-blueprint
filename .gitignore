@@ -17,6 +17,7 @@ kubeconfig
 kubernetes/api/deployment.yaml
 kubernetes/frontend/deployment.yaml
 kubernetes/karpenter/gpu-nodeclass.yaml
+kubernetes/efs/pv.yaml
 
 # Snapshot configuration
 .snapshot-id

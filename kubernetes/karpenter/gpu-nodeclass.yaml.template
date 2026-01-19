@@ -24,10 +24,11 @@ spec:
         volumeType: gp3
         deleteOnTermination: true
     
-    # Data volume with model pre-cached (from snapshot)
+    # Data volume with container images pre-cached (from snapshot)
+    # Model weights are stored in EFS, not here
     - deviceName: /dev/xvdb
       ebs:
-        volumeSize: 150Gi
+        volumeSize: 50Gi
         volumeType: gp3
         iops: 3000
         throughput: 125

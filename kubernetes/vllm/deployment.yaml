@@ -21,6 +21,15 @@ spec:
           operator: Exists
           effect: NoSchedule
       
+      # Spread pods across nodes for dedicated EBS throughput per pod
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: vllm
+              topologyKey: kubernetes.io/hostname
+      
       containers:
         - name: vllm
           image: vllm/vllm-openai:v0.13.0
@@ -69,12 +78,11 @@ spec:
             - name: model-storage
               mountPath: /mnt/models
       
-      # Mount Bottlerocket data volume (/local on host = /dev/xvdb from snapshot)
+      # Mount EFS for shared model storage
       volumes:
         - name: model-storage
-          hostPath:
-            path: /local
-            type: Directory
+          persistentVolumeClaim:
+            claimName: efs-models-pvc
 
 ---
 apiVersion: v1

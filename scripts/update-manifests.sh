@@ -8,6 +8,7 @@ cd terraform
 AWS_ACCOUNT_ID=$(terraform output -raw aws_account_id)
 AWS_REGION=$(terraform output -raw region)
 PROJECT_NAME=$(terraform output -raw project_name)
+EFS_FILESYSTEM_ID=$(terraform output -raw efs_filesystem_id 2>/dev/null || echo "")
 
 cd ..
 
@@ -18,6 +19,9 @@ echo "   Account: ${AWS_ACCOUNT_ID}"
 echo "   Region: ${AWS_REGION}"
 echo "   Project: ${PROJECT_NAME}"
 echo "   Registry: ${REGISTRY}"
+if [ -n "$EFS_FILESYSTEM_ID" ]; then
+  echo "   EFS: ${EFS_FILESYSTEM_ID}"
+fi
 echo ""
 
 # Update API deployment from template
@@ -34,6 +38,13 @@ sed \
   -e "s|REGISTRY_PLACEHOLDER|${REGISTRY}|g" \
   -e "s|PROJECT_PLACEHOLDER|${PROJECT_NAME}|g" \
   kubernetes/frontend/deployment.yaml.template > kubernetes/frontend/deployment.yaml
+
+# Update EFS PV from template
+if [ -n "$EFS_FILESYSTEM_ID" ]; then
+  echo "📝 Generating kubernetes/efs/pv.yaml from template..."
+  sed "s|EFS_FILESYSTEM_ID|${EFS_FILESYSTEM_ID}|g" \
+    kubernetes/efs/pv.yaml.template > kubernetes/efs/pv.yaml
+fi
 
 echo "✅ Manifests generated from templates!"
 echo ""
