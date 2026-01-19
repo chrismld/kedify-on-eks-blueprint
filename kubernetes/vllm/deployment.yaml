@@ -27,6 +27,8 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - "TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+            - "--load-format"
+            - "runai_streamer"
             - "--quantization"
             - "awq"
             - "--max-model-len"
@@ -53,13 +55,15 @@ spec:
             limits:
               nvidia.com/gpu: 1
           
-          
-          # Point to pre-populated model cache on Bottlerocket data volume
           env:
             - name: HUGGINGFACE_HUB_CACHE
               value: /mnt/models/model-cache
-            - name: HF_HOME
+            - name: HF_HUB_CACHE
               value: /mnt/models/model-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
           
           volumeMounts:
             - name: model-storage

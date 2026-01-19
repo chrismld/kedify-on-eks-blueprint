@@ -162,16 +162,16 @@ while true; do
 done
 log "Image pulled"
 
-# Download model - use sheltie with ctr, write to /local which is writable
-log "[5/7] Downloading model $MODEL_NAME (10-15 min)..."
+# [5/7] Download model DIRECTLY to /local (Bottlerocket's data volume)
+log "[5/7] Downloading model $MODEL_NAME..."
 
-cat > /tmp/download-model.json << 'EOFCMD'
+cat > /tmp/download-model.json << 'EOF'
 {
   "commands": [
-    "apiclient exec admin sheltie ctr -a /run/containerd/containerd.sock -n k8s.io run --rm --net-host --env HF_HOME=/cache --mount type=bind,src=/local,dst=/cache,options=rbind docker.io/vllm/vllm-openai:v0.13.0 model-dl python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(\"TheBloke/Mistral-7B-Instruct-v0.2-AWQ\", cache_dir=\"/cache/model-cache\")'"
+    "apiclient exec admin sheltie ctr -a /run/containerd/containerd.sock -n k8s.io run --rm --net-host --env HF_HOME=/models/model-cache --mount type=bind,src=/local,dst=/models,options=rbind docker.io/vllm/vllm-openai:v0.13.0 model-dl python3 -c 'from huggingface_hub import snapshot_download; snapshot_download(\"TheBloke/Mistral-7B-Instruct-v0.2-AWQ\", cache_dir=\"/models/model-cache\")'"
   ]
 }
-EOFCMD
+EOF
 
 CMDID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" \
     --document-name "AWS-RunShellScript" --comment "Download model" \
@@ -180,19 +180,19 @@ CMDID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" \
     --query "Command.CommandId" --output text)
 
 while true; do
-    STATUS=$(aws ssm get-command-invocation --command-id "$CMDID" --instance-id "$INSTANCE_ID" \
-        --query "Status" --output text 2>/dev/null || echo "Pending")
+    STATUS=$(aws ssm get-command-invocation --command-id "$CMDID" --instance-id "$INSTANCE_ID" --query "Status" --output text 2>/dev/null || echo "Pending")
     [[ "$STATUS" == "Success" ]] && break
     if [[ "$STATUS" == "Failed" || "$STATUS" == "TimedOut" ]]; then
-        ERROR=$(aws ssm get-command-invocation --command-id "$CMDID" --instance-id "$INSTANCE_ID" \
-            --query "[StandardErrorContent,StandardOutputContent]" --output text 2>/dev/null)
-        log "Model download failed: $ERROR"
+        ERROR=$(aws ssm get-command-invocation --command-id "$CMDID" --instance-id "$INSTANCE_ID" --query "[StandardErrorContent,StandardOutputContent]" --output text 2>/dev/null)
+        log "ERROR: $ERROR"
         cleanup "$CFN_STACK_NAME"
         exit 1
     fi
     sleep 10
 done
-log "Model downloaded"
+
+rm -f /tmp/download-model.json
+log "Model cached!"
 
 # Stop instance
 log "[6/7] Stopping instance..."
