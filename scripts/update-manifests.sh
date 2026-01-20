@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+export PATH="/usr/local/bin:$PATH"
 
 echo "🔧 Updating Kubernetes manifests..."
 

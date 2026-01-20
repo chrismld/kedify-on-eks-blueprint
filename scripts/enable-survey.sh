@@ -36,6 +36,10 @@ if [ -n "$CURRENT_EXISTS" ]; then
   echo ""
 fi
 
+SESSION_ID=$(date +"%Y%m%d-%H%M%S")
+echo "{\"sessionId\": \"$SESSION_ID\"}" | aws s3 cp - s3://$BUCKET/current/session.json --quiet
+echo "📝 Created new session: $SESSION_ID"
+
 echo "🔧 Enabling survey mode..."
 kubectl patch configmap api-config \
   -n default \

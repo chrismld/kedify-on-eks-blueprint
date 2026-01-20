@@ -1,7 +1,7 @@
 .PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard restart-demo enable-survey pick-winners teardown get-frontend-url generate-qr optimize-vllm help
 
 # Ensure /usr/local/bin is in PATH for kubectl and aws
-export PATH := $(PATH):/usr/local/bin
+export PATH := /usr/local/bin:$(PATH)
 
 help:
 	@echo "🚇 AI Workloads Tube Demo - Available targets"

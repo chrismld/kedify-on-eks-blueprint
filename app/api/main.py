@@ -94,9 +94,8 @@ async def health():
 @app.get("/api/config")
 async def get_config():
     """Frontend polls this to detect mode"""
-    # Check if winners have been picked
     winners_picked = False
-    session_timestamp = None
+    session_id = None
     
     if s3_client and DEMO_MODE == "survey":
         try:
@@ -108,25 +107,20 @@ async def get_config():
         except:
             pass
         
-        # Get session start time from first response or use current time
         try:
-            response = s3_client.list_objects_v2(
+            response = s3_client.get_object(
                 Bucket=RESPONSES_BUCKET,
-                Prefix="current/responses/",
-                MaxKeys=1
+                Key="current/session.json"
             )
-            if "Contents" in response and len(response["Contents"]) > 0:
-                session_timestamp = int(response["Contents"][0]["LastModified"].timestamp() * 1000)
-            else:
-                # No responses yet, use current time as session start
-                session_timestamp = int(datetime.now().timestamp() * 1000)
+            session_data = json.loads(response["Body"].read())
+            session_id = session_data.get("sessionId")
         except:
-            session_timestamp = int(datetime.now().timestamp() * 1000)
+            pass
     
     return {
         "mode": DEMO_MODE,
         "winnersPicked": winners_picked,
-        "sessionTimestamp": session_timestamp
+        "sessionId": session_id
     }
 
 @app.post("/api/question/submit")

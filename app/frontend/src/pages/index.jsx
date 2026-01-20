@@ -4,7 +4,7 @@ import axios from 'axios'
 export default function Home() {
   const [mode, setMode] = useState('loading')
   const [winnersPicked, setWinnersPicked] = useState(false)
-  const [sessionTimestamp, setSessionTimestamp] = useState(null)
+  const [sessionId, setSessionId] = useState(null)
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -21,17 +21,8 @@ export default function Home() {
         setMode(res.data.mode)
         setWinnersPicked(res.data.winnersPicked || false)
         
-        // Check if this is a new session
-        if (res.data.sessionTimestamp) {
-          const savedSessionTimestamp = localStorage.getItem('surveySessionTimestamp')
-          if (savedSessionTimestamp && parseInt(savedSessionTimestamp) !== res.data.sessionTimestamp) {
-            // New session detected, update timestamp (response ID will be ignored by the check above)
-            localStorage.setItem('surveySessionTimestamp', res.data.sessionTimestamp.toString())
-          } else if (!savedSessionTimestamp) {
-            // First time seeing this session
-            localStorage.setItem('surveySessionTimestamp', res.data.sessionTimestamp.toString())
-          }
-          setSessionTimestamp(res.data.sessionTimestamp)
+        if (res.data.sessionId) {
+          setSessionId(res.data.sessionId)
         }
       } catch (e) {
         setMode('quiz')
@@ -91,7 +82,7 @@ export default function Home() {
 
   if (mode === 'loading') return <div className="loader">Loading...</div>
   if (mode === 'survey') {
-    return <SurveyPage winnersPicked={winnersPicked} sessionTimestamp={sessionTimestamp} />
+    return <SurveyPage winnersPicked={winnersPicked} sessionId={sessionId} />
   }
 
   if (submitted) {
@@ -261,7 +252,7 @@ function SessionClosedPage() {
   )
 }
 
-function SurveyPage({ winnersPicked, sessionTimestamp }) {
+function SurveyPage({ winnersPicked, sessionId }) {
   const [rating, setRating] = useState(5)
   const [company, setCompany] = useState('')
   const [feedback, setFeedback] = useState('')
@@ -269,20 +260,16 @@ function SurveyPage({ winnersPicked, sessionTimestamp }) {
   const [isWinner, setIsWinner] = useState(false)
   const [responseId, setResponseId] = useState(null)
 
-  // Check if already submitted for current session
   useEffect(() => {
-    const savedSessionTimestamp = localStorage.getItem('surveySessionTimestamp')
-    const currentSessionTimestamp = sessionTimestamp?.toString()
-    
-    // Only consider submitted if it's for the current session
-    if (savedSessionTimestamp && currentSessionTimestamp && savedSessionTimestamp === currentSessionTimestamp) {
+    const savedSessionId = localStorage.getItem('surveySessionId')
+    if (savedSessionId && sessionId && savedSessionId === sessionId) {
       const savedResponseId = localStorage.getItem('surveyResponseId')
       if (savedResponseId) {
         setSubmitted(true)
         setResponseId(savedResponseId)
       }
     }
-  }, [sessionTimestamp])
+  }, [sessionId])
 
   useEffect(() => {
     if (responseId) {
@@ -314,6 +301,7 @@ function SurveyPage({ winnersPicked, sessionTimestamp }) {
       setResponseId(newResponseId)
       setSubmitted(true)
       localStorage.setItem('surveyResponseId', newResponseId)
+      localStorage.setItem('surveySessionId', sessionId)
     } catch (e) {
       console.error(e)
       alert('Failed to submit survey. Please try again.')
