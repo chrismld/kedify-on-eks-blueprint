@@ -21,15 +21,6 @@ spec:
           operator: Exists
           effect: NoSchedule
       
-      # Spread pods across nodes for dedicated EBS throughput per pod
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: vllm
-              topologyKey: kubernetes.io/hostname
-      
       containers:
         - name: vllm
           image: vllm/vllm-openai:v0.13.0

@@ -27,6 +27,12 @@ spec:
       - key: karpenter.k8s.aws/instance-gpu-manufacturer
         operator: In
         values: ["nvidia"]
+      - key: karpenter.k8s.aws/instance-size
+        operator: NotIn
+        values: ["metal"]
+      - key: karpenter.k8s.aws/instance-gpu-name
+        operator: NotIn
+        values: ["v100", "k80"]
       taints:
       - key: nvidia.com/gpu
         effect: NoSchedule
