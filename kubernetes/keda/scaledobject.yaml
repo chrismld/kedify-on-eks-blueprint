@@ -13,8 +13,8 @@ spec:
   triggers:
   - type: kedify-otel
     metadata:
-      scalerAddress: 'keda-otel-scaler.keda.svc:4318'
-      metricQuery: 'sum(vllm_num_requests_waiting{app=vllm})'
+      scalerAddress: 'kedify-otel-scaler.keda.svc:4318'
+      metricQuery: 'sum(vllm_num_requests_waiting)'
       targetValue: '1'
       clampMin: '0'
       clampMax: '500'
@@ -23,9 +23,6 @@ spec:
     horizontalPodAutoscalerConfig:
       behavior:
         scaleDown:
-          stabilizationWindowSeconds: 30
+          stabilizationWindowSeconds: 60
         scaleUp:
           stabilizationWindowSeconds: 10
-    scalingModifiers:
-      formula: 'clamp_min(current_queue * 50, 1)'
-      target: '50'
