@@ -1,4 +1,4 @@
-.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard restart-demo enable-survey pick-winners teardown get-frontend-url generate-qr setup-model-s3 help
+.PHONY: setup-infra build-push-images deploy-apps setup-cloudfront run-demo dashboard restart-demo enable-survey pick-winners teardown get-frontend-url generate-qr setup-model-s3 load-test load-test-cleanup help
 
 # Ensure /usr/local/bin is in PATH for kubectl and aws
 export PATH := /usr/local/bin:$(PATH)
@@ -16,6 +16,8 @@ help:
 	@echo "  make get-frontend-url    Get the frontend URL (ALB or CloudFront)"
 	@echo "  make generate-qr         Generate QR code for audience"
 	@echo "  make run-demo            Start k6 load gen and terminal dashboard"
+	@echo "  make load-test           Run k6 load test (cleanup + start)"
+	@echo "  make load-test-cleanup   Cleanup k6 load test job"
 	@echo "  make dashboard           Start terminal dashboard only"
 	@echo "  make restart-demo        Restart demo to quiz mode"
 	@echo "  make enable-survey       Switch to survey mode (auto-archives previous)"
@@ -130,6 +132,14 @@ generate-qr:
 run-demo:
 	@echo "🎬 Starting demo..."
 	bash scripts/run-demo.sh
+
+load-test:
+	@echo "🔥 Running k6 load test..."
+	bash scripts/run-load-test.sh --watch
+
+load-test-cleanup:
+	@echo "🧹 Cleaning up k6 load test..."
+	bash scripts/run-load-test.sh --cleanup-only
 
 dashboard:
 	@echo "📊 Starting terminal dashboard..."

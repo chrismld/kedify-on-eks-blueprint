@@ -474,6 +474,30 @@ kubectl logs deployment/vllm
 kubectl exec -it deployment/api -- curl http://vllm-service:8000/v1/models
 ```
 
+### KEDA not scaling vLLM pods
+
+**Cause:** OTel collector not scraping metrics or metric name mismatch
+
+**Fix:**
+```bash
+# Check ScaledObject status
+kubectl get scaledobject vllm-queue-scaler -o yaml
+
+# Check OTel collector is running
+kubectl get pods -n keda -l app.kubernetes.io/name=scrape-vllm-collector
+
+# Check OTel collector logs
+kubectl logs -n keda -l app.kubernetes.io/name=scrape-vllm-collector
+
+# Verify vLLM metrics are exposed
+kubectl exec deployment/vllm -- curl -s localhost:8000/metrics | grep num_requests
+
+# Check KEDA operator logs
+kubectl logs -n keda -l app=keda-operator
+```
+
+**Note:** vLLM exposes metrics with colons (`vllm:num_requests_waiting`) but KEDA queries with underscores (`vllm_num_requests_waiting`). The OTel collector config in `kubernetes/keda/otel-collector.yaml` handles this transformation.
+
 ### Karpenter not provisioning nodes
 
 **Cause:** IAM permissions or NodePool misconfiguration
@@ -500,6 +524,70 @@ kubectl get ec2nodeclass
 aws ecr get-login-password --region eu-west-1 | \
   docker login --username AWS --password-stdin \
   $(aws sts get-caller-identity --query Account --output text).dkr.ecr.eu-west-1.amazonaws.com
+```
+
+---
+
+## Enabling KEDA Autoscaling
+
+KEDA (with Kedify) provides queue-based autoscaling for vLLM based on the number of waiting requests.
+
+### Prerequisites
+
+Install Kedify (includes KEDA + OTel scaler):
+```bash
+# Follow Kedify installation instructions for your cluster
+# This creates the 'keda' namespace with KEDA operator and kedify-otel-scaler
+```
+
+### Deploy KEDA Resources
+
+```bash
+# Apply RBAC for OTel collector to scrape pod metrics
+kubectl apply -f kubernetes/keda/otel-rbac.yaml
+
+# Apply OpenTelemetry Collector (scrapes vLLM metrics)
+kubectl apply -f kubernetes/keda/otel-collector.yaml
+
+# Apply ScaledObject (triggers autoscaling)
+kubectl apply -f kubernetes/keda/scaledobject.yaml
+```
+
+### Verify Setup
+
+```bash
+# Check OTel collector is running
+kubectl get pods -n keda -l app.kubernetes.io/name=scrape-vllm-collector
+
+# Check ScaledObject is ready
+kubectl get scaledobject vllm-queue-scaler
+
+# Check HPA was created
+kubectl get hpa
+```
+
+### How It Works
+
+1. **OTel Collector** scrapes `vllm:num_requests_waiting` from vLLM pods every 5s
+2. **Transform processor** renames metric to `vllm_num_requests_waiting` (KEDA compatibility)
+3. **KEDA** queries the metric and scales vLLM deployment when queue > 1
+4. **Karpenter** provisions GPU nodes as needed for new pods
+
+### Load Testing
+
+Run the k6 load test to trigger autoscaling:
+```bash
+# Apply the k6 job (runs inside cluster)
+kubectl apply -f kubernetes/k6-load-test.yaml
+
+# Watch the scaling
+kubectl get pods -l app=vllm -w
+
+# Check k6 progress
+kubectl logs job/k6-load-test -f
+
+# Clean up after test
+kubectl delete job k6-load-test
 ```
 
 ---

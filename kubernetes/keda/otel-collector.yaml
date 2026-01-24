@@ -1,0 +1,98 @@
+# OpenTelemetry Collector for scraping vLLM metrics and forwarding to KEDA
+# This collector:
+# 1. Scrapes Prometheus metrics from vLLM pods on port 8000
+# 2. Renames vllm:num_requests_waiting -> vllm_num_requests_waiting (KEDA compatibility)
+# 3. Forwards metrics to kedify-otel-scaler for autoscaling decisions
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: scrape-vllm
+  namespace: keda
+  labels:
+    helm.sh/chart: v0.1.3
+    meta.helm.sh/release-name: kedify-agent
+spec:
+  mode: deployment
+  replicas: 1
+  imagePullPolicy: IfNotPresent
+  upgradeStrategy: none
+  resources:
+    requests:
+      cpu: 200m
+      memory: 64Mi
+    limits:
+      cpu: 400m
+      memory: 128Mi
+  config:
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: vllm-metrics
+              scrape_interval: 5s
+              kubernetes_sd_configs:
+                - role: pod
+                  namespaces:
+                    names:
+                      - default
+              relabel_configs:
+                # Only scrape pods with app=vllm label
+                - source_labels: [__meta_kubernetes_pod_label_app]
+                  action: keep
+                  regex: vllm
+                # Add pod name as label
+                - source_labels: [__meta_kubernetes_pod_name]
+                  action: replace
+                  target_label: pod_name
+                # Scrape metrics from port 8000 (vLLM API port)
+                - source_labels: [__address__]
+                  action: replace
+                  regex: (.+):.*
+                  replacement: $1:8000
+                  target_label: __address__
+
+    processors:
+      # Detect environment attributes
+      resourcedetection/env:
+        detectors: [env]
+        timeout: 2s
+        override: false
+
+      # Transform: rename metric from colon format to underscore format
+      # vLLM exposes vllm:num_requests_waiting but KEDA queries vllm_num_requests_waiting
+      transform:
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["namespace"], resource.attributes["k8s.namespace.name"])
+              - set(attributes["pod"], resource.attributes["k8s.pod.name"])
+              - set(attributes["deployment"], resource.attributes["k8s.deployment.name"])
+          - context: metric
+            statements:
+              - set(name, "vllm_num_requests_waiting") where name == "vllm:num_requests_waiting"
+
+      # Filter to only include the metrics we need
+      filter/metrics:
+        metrics:
+          include:
+            match_type: strict
+            metric_names:
+              - vllm:num_requests_waiting
+              - vllm_num_requests_waiting
+
+    exporters:
+      otlp/keda:
+        endpoint: kedify-otel-scaler.keda.svc:4317
+        tls:
+          insecure: true
+        compression: none
+
+    service:
+      telemetry:
+        logs:
+          level: info  # Change to 'debug' for troubleshooting
+      pipelines:
+        metrics:
+          receivers: [prometheus]
+          processors: [resourcedetection/env, transform, filter/metrics]
+          exporters: [otlp/keda]

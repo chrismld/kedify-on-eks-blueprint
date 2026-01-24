@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-script
+  namespace: default
+data:
+  load-test.js: |
+    import http from 'k6/http';
+    import { check, sleep } from 'k6';
+
+    const questions = [
+      "How many lines does the London Underground have?",
+      "What is the oldest line on the Tube?",
+      "How many stations are on the Central Line?",
+      "Which line is the Circle Line?",
+      "What year did the Tube open?",
+      "Which station is the deepest?",
+      "How many passengers use the Tube daily?",
+      "What color is the Piccadilly Line?",
+      "Which line goes to Heathrow?",
+      "What is the shortest line on the Tube?",
+    ];
+
+    export const options = {
+      scenarios: {
+        ramp_up: {
+          executor: 'ramping-vus',
+          startVUs: 10,
+          stages: [
+            { duration: '30s', target: 50 },
+            { duration: '60s', target: 100 },
+            { duration: '60s', target: 100 },
+            { duration: '30s', target: 0 },
+          ],
+        },
+      },
+    };
+
+    export default function () {
+      const url = 'http://api:8000/api/question/submit';
+      const payload = JSON.stringify({
+        question: questions[Math.floor(Math.random() * questions.length)],
+        session_id: `k6_${__VU}_${__ITER}`,
+      });
+
+      const params = {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: '60s',
+      };
+
+      const res = http.post(url, payload, params);
+      check(res, { 'status is 200': (r) => r.status === 200 });
+      sleep(0.5);
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-load-test
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: k6
+        image: grafana/k6:latest
+        command: ["k6", "run", "/scripts/load-test.js"]
+        volumeMounts:
+        - name: k6-script
+          mountPath: /scripts
+      volumes:
+      - name: k6-script
+        configMap:
+          name: k6-script
