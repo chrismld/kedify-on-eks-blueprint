@@ -26,24 +26,26 @@ spec:
             sizeLimit: 16Gi
       containers:
         - name: vllm
-          image: 889947746832.dkr.ecr.eu-west-1.amazonaws.com/ecr-public/deep-learning-containers/vllm:0.13-gpu-py312-ec2
+          image: REGISTRY_PLACEHOLDER/ecr-public/deep-learning-containers/vllm:0.13-gpu-py312-ec2
           imagePullPolicy: IfNotPresent
           args:
             - "--model"
-            - "s3://kedify-on-eks-blueprint-models-889947746832/models/mistral-7b-awq/"
-            - "--served-model-name=TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+            - "S3_MODEL_PATH_PLACEHOLDER"
+            - "--served-model-name=MODEL_NAME_PLACEHOLDER"
             - "--load-format"
             - "runai_streamer"
             - "--max-model-len"
-            - "2048"
+            - "4096"
             - "--max-num-seqs"
-            - "32"
+            - "4"
+            - "--max-num-batched-tokens"
+            - "1024"
             - "--gpu-memory-utilization"
-            - "0.95"
+            - "0.85"
             - "--dtype"
             - "auto"
             - "--quantization"
-            - "awq_marlin"
+            - "awq"
           ports:
             - name: api
               containerPort: 8000

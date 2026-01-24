@@ -32,7 +32,7 @@ spec:
         values: ["metal"]
       - key: karpenter.k8s.aws/instance-gpu-name
         operator: NotIn
-        values: ["v100", "k80"]
+        values: ["v100", "k80", "t4"]
       taints:
       - key: nvidia.com/gpu
         effect: NoSchedule

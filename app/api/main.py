@@ -6,7 +6,14 @@ from datetime import datetime
 import boto3
 import httpx
 import asyncio
+import re
 from typing import Optional
+
+
+def strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> tags and their content from LLM responses."""
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
 
 app = FastAPI(title="Tube Demo API")
 
@@ -22,6 +29,7 @@ app.add_middleware(
 # Config
 DEMO_MODE = os.getenv("DEMO_MODE", "quiz")
 VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm:8000")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "TheBloke/Mistral-7B-Instruct-v0.2-AWQ")
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-1")
 PROJECT_NAME = os.getenv("PROJECT_NAME", "tube-demo")
 
@@ -137,29 +145,25 @@ async def submit_question(data: dict):
     
     # Get answer from vLLM
     answer = "Processing your question..."
+    
+    # Use completions endpoint (not chat) to avoid Mistral chat template issues
+    system_prompt = "You are a cheeky London Underground expert with a brilliant sense of humor. Answer questions about the Tube with wit, charm, and fascinating facts. Keep responses under 100 words. Throw in some British slang when appropriate, but stay respectful and helpful."
+    prompt = f"[INST] {system_prompt}\n\n{question} [/INST]"
+    
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{VLLM_ENDPOINT}/v1/chat/completions",
+                f"{VLLM_ENDPOINT}/v1/completions",
                 json={
-                    "model": "TheBloke/Mistral-7B-Instruct-v0.2-AWQ",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a cheeky London Underground expert with a brilliant sense of humor. Answer questions about the Tube with wit, charm, and fascinating facts. Keep responses under 100 words. Throw in some British slang when appropriate, but stay respectful and helpful. Think of yourself as a friendly conductor who loves a good laugh!"
-                        },
-                        {
-                            "role": "user",
-                            "content": question
-                        }
-                    ],
-                    "max_tokens": 150,
+                    "model": VLLM_MODEL,
+                    "prompt": prompt,
+                    "max_tokens": 75,
                     "temperature": 0.8
                 }
             )
             result = response.json()
             if "choices" in result and len(result["choices"]) > 0:
-                answer = result["choices"][0]["message"]["content"]
+                answer = strip_think_tags(result["choices"][0]["text"])
     except Exception as e:
         print(f"vLLM error: {e}")
         answer = "Blimey! The AI is having a bit of a moment. Your question is queued though! 🚇"
@@ -248,7 +252,13 @@ async def chat_completion(request: dict):
                 f"{VLLM_ENDPOINT}/v1/chat/completions",
                 json=request
             )
-            return response.json()
+            result = response.json()
+            # Strip think tags from all choices
+            if "choices" in result:
+                for choice in result["choices"]:
+                    if "message" in choice and "content" in choice["message"]:
+                        choice["message"]["content"] = strip_think_tags(choice["message"]["content"])
+            return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

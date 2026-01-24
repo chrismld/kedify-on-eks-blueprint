@@ -1,14 +1,15 @@
 #!/bin/bash
 set -e
 
-echo "🔍 Getting configuration from Terraform..."
-cd terraform
+# Load config from .demo-config if it exists
+if [ -f ".demo-config" ]; then
+  echo "🔍 Loading configuration from .demo-config..."
+  source .demo-config
+fi
 
-AWS_ACCOUNT_ID=$(terraform output -raw aws_account_id 2>/dev/null || aws sts get-caller-identity --query Account --output text)
-AWS_REGION=$(terraform output -raw region 2>/dev/null || echo "eu-west-1")
-PROJECT_NAME=$(terraform output -raw project_name 2>/dev/null || echo "tube-demo")
-
-cd ..
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_REGION=${AWS_REGION:-"eu-west-1"}
+PROJECT_NAME=${PROJECT_NAME:-"tube-demo"}
 
 REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 

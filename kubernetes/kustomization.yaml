@@ -5,9 +5,6 @@ namespace: default
 
 resources:
 - namespace.yaml
-- efs/storageclass.yaml
-- efs/pv.yaml
-- efs/pvc.yaml
 - karpenter/gpu-nodeclass.yaml
 - karpenter/gpu-nodepool.yaml
 # KEDA ScaledObject commented out - uncomment when KEDA is installed

@@ -1,4 +1,4 @@
-# Setup Guide: From Zero to Serving in 45 Minutes
+# Setup Guide: From Zero to Serving in 40 Minutes
 
 This guide walks you through deploying the complete LLM inference stack on EKS. By the end, you'll have a production-ready system with GPU autoscaling, optimized cold starts, and a live demo you can share with an audience.
 
@@ -15,15 +15,42 @@ Your Laptop                          AWS
 └──────────────┘                    │ ├── vLLM (GPU inference)        │
                                     │ ├── API (FastAPI)               │
                                     │ ├── Frontend (Next.js)          │
-                                    │ └── EFS (shared model storage)  │
+                                    │ └── S3 (model storage)          │
                                     └─────────────────────────────────┘
 ```
 
 **Time breakdown:**
-- Infrastructure (EKS, Karpenter, KEDA, EFS): ~20 minutes
-- Container image caching (EBS snapshot): ~10-15 minutes (optional)
-- Application deployment + model loading: ~8-10 minutes
-- **Total: ~40-45 minutes**
+- Infrastructure (EKS, Karpenter, S3): ~20 minutes
+- Model upload to S3: ~5 minutes
+- Application deployment: ~5-10 minutes
+- **Total: ~35-40 minutes**
+
+---
+
+## Architecture Highlights
+
+This setup uses several optimizations for fast cold starts:
+
+1. **EBS Snapshot with Pre-cached Image** - Container image is pre-loaded on the data volume, eliminating pull time
+2. **SOCI Snapshotter** - Fallback for any images not in the snapshot (lazy loading)
+3. **S3 Model Streaming** - vLLM streams model weights directly from S3 via Run:ai Streamer
+
+### Creating the EBS Snapshot (Optional but Recommended)
+
+For the fastest cold starts (~90 seconds), create an EBS snapshot with the vLLM image pre-cached:
+
+```bash
+# After setup-infra, create the snapshot
+make create-snapshot
+```
+
+This takes ~10-15 minutes and:
+1. Launches a temporary Bottlerocket instance
+2. Pulls the vLLM container image from ECR
+3. Creates an EBS snapshot of the data volume
+4. Updates `.demo-config` with the snapshot ID
+
+Without the snapshot, cold starts take ~3-4 minutes (SOCI parallel pull).
 
 ---
 
@@ -42,7 +69,14 @@ Install these before starting:
 
 ```bash
 # macOS (recommended)
-brew install terraform kubectl aws-cli docker jq
+brew install terraform kubectl aws-cli docker jq pipx
+
+# For model upload (HuggingFace CLI)
+pipx install huggingface_hub   # Provides 'hf' command
+
+# Authenticate with HuggingFace (required for faster downloads)
+# Get a token from: https://huggingface.co/settings/tokens
+hf auth login
 
 # Verify installations
 terraform --version    # >= 1.5
@@ -96,13 +130,10 @@ vim terraform/terraform.tfvars
 # terraform/terraform.tfvars
 
 # Required: Your preferred region
-aws_region = "eu-west-1"
+region = "eu-west-1"
 
 # Required: Unique project name (used for S3 buckets, ECR repos)
 project_name = "tube-demo"
-
-# Optional: Customize cluster name
-cluster_name = "gpu-inference-demo"
 ```
 
 **Region selection tips:**
@@ -114,7 +145,7 @@ cluster_name = "gpu-inference-demo"
 
 ## Step 2: Deploy Infrastructure (20 minutes)
 
-This creates the EKS cluster, Karpenter, KEDA, EFS, and supporting infrastructure.
+This creates the EKS cluster, Karpenter, S3 bucket, and supporting infrastructure.
 
 ```bash
 make setup-infra
@@ -123,10 +154,10 @@ make setup-infra
 **What's happening:**
 1. VPC with public/private subnets
 2. EKS cluster with managed node group (for system pods)
-3. Karpenter controller + NodePools
-4. KEDA + Kedify OTEL scaler
-5. AWS Load Balancer Controller
-6. EFS filesystem for shared model storage
+3. Karpenter controller + NodePools with SOCI snapshotter
+4. S3 bucket for model storage
+5. IAM roles for vLLM to access S3
+6. AWS Load Balancer Controller
 7. ECR repositories for your images
 
 **Watch the progress:**
@@ -143,46 +174,63 @@ Apply complete! Resources: 47 added, 0 changed, 0 destroyed.
 Outputs:
 cluster_endpoint = "https://xxx.eks.amazonaws.com"
 cluster_name = "gpu-inference-demo"
+models_bucket_name = "kedify-on-eks-blueprint-models-123456789"
 ```
 
 ### Verify the Cluster
 
 ```bash
 # Update kubeconfig
-aws eks update-kubeconfig --name gpu-inference-demo --region eu-west-1
+aws eks update-kubeconfig --name kedify-on-eks-blueprint --region eu-west-1
 
 # Check system pods
 kubectl get pods -n kube-system
 kubectl get pods -n karpenter
-kubectl get pods -n keda
 ```
 
 All pods should be `Running` before proceeding.
 
 ---
 
-## Step 3: Optimize Container Image Pulls (10-15 minutes) - Optional
+## Step 3: Create EBS Snapshot (Optional, 10-15 minutes)
 
-This step creates an EBS snapshot with the vLLM container image pre-cached, reducing image pull time from ~90 seconds to ~10 seconds on new nodes.
+For the fastest cold starts, create an EBS snapshot with the vLLM image pre-cached:
 
 ```bash
-make optimize-vllm
+make create-snapshot
 ```
 
 **What's happening:**
-1. Launches a temporary EC2 instance (Bottlerocket)
-2. Pulls the vLLM container image (~8-10 GB)
-3. Creates an EBS snapshot of the data volume
-4. Updates Karpenter's EC2NodeClass to use the snapshot
+1. Launches a temporary Bottlerocket EC2 instance
+2. Authenticates with ECR and pulls the vLLM image
+3. Stops the instance and creates an EBS snapshot
+4. Updates `.demo-config` with the snapshot ID
 5. Cleans up the temporary instance
 
-**Note:** Model weights are stored in EFS (shared storage), not in this snapshot. This step only optimizes container image pulls.
-
-**You can skip this step** if you're okay with ~90 second image pulls on new nodes. The model loading time (~1-2 min from EFS) is the same either way.
+**Skip this step** if you're okay with ~3-4 minute cold starts (SOCI will handle image pulls).
 
 ---
 
-## Step 4: Build and Push Images (10 minutes)
+## Step 4: Upload Model to S3 (5 minutes)
+
+Upload the Mistral 7B AWQ quantized model to S3 for streaming.
+
+```bash
+make setup-model-s3
+```
+
+**What's happening:**
+1. Downloads AWQ quantized model from HuggingFace (~4GB)
+2. Uploads to S3 bucket
+3. Updates vLLM deployment manifest with S3 path
+
+**Note:** This only needs to be done once. The model persists in S3.
+
+**Why AWQ?** The quantized model is ~4GB vs ~14GB for full precision, allowing it to run on T4 GPUs (16GB VRAM) with plenty of room for KV cache.
+
+---
+
+## Step 5: Build and Push Images (10 minutes)
 
 Build the API and frontend containers and push to ECR.
 
@@ -203,9 +251,9 @@ aws ecr describe-images --repository-name tube-demo/frontend
 
 ---
 
-## Step 5: Deploy Applications (8-10 minutes)
+## Step 6: Deploy Applications (5-10 minutes)
 
-Deploy vLLM, API, and frontend to the cluster. On first run, this also downloads the model to EFS.
+Deploy vLLM, API, and frontend to the cluster.
 
 ```bash
 make deploy-apps
@@ -213,16 +261,11 @@ make deploy-apps
 
 **What's happening:**
 1. Applies Kubernetes manifests from `kubernetes/`
-2. Creates EFS PersistentVolume and PersistentVolumeClaim
-3. Runs model-loader Job to download Mistral 7B to EFS (first time only, ~3-5 min)
-4. Karpenter provisions a GPU node
-5. vLLM pod starts and loads the model from EFS
+2. Karpenter provisions a GPU node with SOCI snapshotter
+3. vLLM pod starts and streams model from S3
 
 **Watch the deployment:**
 ```bash
-# Watch the model loader job (first time only)
-kubectl logs -f job/model-loader
-
 # Watch pods
 kubectl get pods -w
 
@@ -235,8 +278,7 @@ kubectl logs -f deployment/vllm
 
 **Success indicators in vLLM logs:**
 ```
-HF_HUB_OFFLINE is True, replace model_id [...] to model_path [...]
-Loading safetensors using Runai Model Streamer: 100% Completed
+Loading safetensors from S3...
 [RunAI Streamer] Overall time to stream 3.9 GiB: X.XXs
 Model loading took X.XX GiB memory and XX.XX seconds
 Starting vLLM API server on http://0.0.0.0:8000
@@ -244,7 +286,7 @@ Starting vLLM API server on http://0.0.0.0:8000
 
 ---
 
-## Step 6: Get the Frontend URL
+## Step 7: Get the Frontend URL
 
 ```bash
 make get-frontend-url
@@ -259,7 +301,7 @@ This returns the ALB URL where your frontend is accessible. Open it in a browser
 
 ---
 
-## Step 7: Run the Demo (Optional)
+## Step 8: Run the Demo (Optional)
 
 If you're presenting this to an audience:
 
@@ -291,7 +333,7 @@ make pick-winners
 
 ---
 
-## Step 8: Cleanup
+## Step 9: Cleanup
 
 When you're done, tear everything down:
 
@@ -303,13 +345,10 @@ This destroys:
 - All Kubernetes resources
 - EKS cluster
 - Karpenter-provisioned nodes
+- EBS snapshot (if created)
+- S3 bucket (including model)
 - ECR repositories
 - VPC and networking
-
-**Note:** The EBS snapshot is NOT deleted (it's cheap to keep). Delete manually if needed:
-```bash
-aws ec2 delete-snapshot --snapshot-id $(cat .snapshot-id)
-```
 
 ---
 
@@ -319,10 +358,12 @@ aws ec2 delete-snapshot --snapshot-id $(cat .snapshot-id)
 
 | Command | Description | Time |
 |---------|-------------|------|
-| `make setup-infra` | Create EKS + Karpenter + KEDA + EFS | 20 min |
-| `make optimize-vllm` | Create container image snapshot (optional) | 10-15 min |
+| `make setup-infra` | Create EKS + Karpenter + S3 | 20 min |
+| `make create-snapshot` | Create EBS snapshot with vLLM image | 10-15 min |
+| `make setup-model-s3` | Upload model to S3 | 5 min |
 | `make build-push-images` | Build and push containers | 10 min |
-| `make deploy-apps` | Deploy all applications + load model | 8-10 min |
+| `make update-manifests` | Regenerate K8s manifests | instant |
+| `make deploy-apps` | Deploy all applications | 5-10 min |
 | `make get-frontend-url` | Get the demo URL | instant |
 | `make run-demo` | Start load gen + dashboard | instant |
 | `make teardown` | Destroy everything | 10 min |
@@ -367,15 +408,12 @@ The API reads these from its ConfigMap/environment:
 
 ### vLLM pod stuck in Pending
 
-**Cause:** No GPU node available or EFS PVC not bound
+**Cause:** No GPU node available
 
 **Fix:**
 ```bash
 # Check if Karpenter is provisioning
 kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter | tail -20
-
-# Check PVC is bound
-kubectl get pvc efs-models-pvc
 
 # Check NodePool
 kubectl get nodepool gpu-inference -o yaml
@@ -384,39 +422,41 @@ kubectl get nodepool gpu-inference -o yaml
 # Try a different instance type or region
 ```
 
-### Model loader job fails
+### vLLM fails to load model from S3
 
-**Cause:** Network issues or EFS mount problems
+**Cause:** IAM permissions or bucket path issues
 
 **Fix:**
 ```bash
-# Check job logs
-kubectl logs job/model-loader
+# Check vLLM logs for S3 errors
+kubectl logs deployment/vllm | grep -i s3
 
-# Check EFS mount target status
-aws efs describe-mount-targets --file-system-id $(terraform -chdir=terraform output -raw efs_filesystem_id)
+# Verify service account has correct role
+kubectl get sa vllm -o yaml
 
-# Retry the job
-kubectl delete job model-loader
-kubectl apply -f kubernetes/efs/model-loader-job.yaml
+# Test S3 access from pod
+kubectl exec deployment/vllm -- aws s3 ls s3://YOUR_BUCKET/models/
 ```
 
-### vLLM takes a long time to start (>3 min)
+### Slow container image pull
 
-**Cause:** Model loading from EFS (expected ~1-2 min on first load per node)
+**Cause:** EBS snapshot not configured or image not in snapshot
 
-**Note:** Unlike the EBS snapshot approach, EFS loads the model over the network. This is slower but enables:
-- Scale-to-zero without losing the model
-- Shared storage across all pods
-- Simpler model updates (just re-run the loader job)
-
-**Fix (if slower than expected):**
+**Fix:**
 ```bash
-# Check EFS throughput mode
-aws efs describe-file-systems --file-system-id $(terraform -chdir=terraform output -raw efs_filesystem_id)
+# Check if snapshot is configured
+grep SNAPSHOT_ID .demo-config
 
-# Should show: "ThroughputMode": "elastic"
+# If empty, create the snapshot
+make create-snapshot
+make update-manifests
+make deploy-apps
+
+# Verify EC2NodeClass has snapshotID
+kubectl get ec2nodeclass gpu -o yaml | grep snapshotID
 ```
+
+If you don't want to use snapshots, SOCI will still provide faster pulls than default (~3-4 min vs ~6-8 min).
 
 ### "Processing your question..." error in UI
 

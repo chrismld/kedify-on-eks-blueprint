@@ -11,11 +11,62 @@ module "karpenter" {
 
   node_iam_role_additional_policies = {
     AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    ECRPullThroughCache          = aws_iam_policy.ecr_pull_through_cache.arn
+    S3ModelsReadOnly             = aws_iam_policy.s3_models_read.arn
   }
 
   node_iam_role_use_name_prefix   = false
   node_iam_role_name              = local.name
   create_pod_identity_association = true
+
+  tags = local.tags
+}
+
+# IAM policy for S3 model access
+# Nodes need read access to stream model weights from S3
+resource "aws_iam_policy" "s3_models_read" {
+  name        = "${local.name}-s3-models-read"
+  description = "Allow EKS nodes to read model weights from S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.models.arn,
+          "${aws_s3_bucket.models.arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = local.tags
+}
+
+# IAM policy for ECR pull-through cache
+# Nodes need these permissions to create cached repositories on first pull
+resource "aws_iam_policy" "ecr_pull_through_cache" {
+  name        = "${local.name}-ecr-pull-through-cache"
+  description = "Allow EKS nodes to use ECR pull-through cache"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:CreateRepository",
+          "ecr:BatchImportUpstreamImage"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
 
   tags = local.tags
 }

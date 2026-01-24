@@ -3,44 +3,48 @@ kind: EC2NodeClass
 metadata:
   name: gpu
 spec:
-  role: "kedify-on-eks-blueprint"
+  role: "${CLUSTER_NAME}"
   
-  # Use Bottlerocket AMI
+  # Use Bottlerocket AMI for GPU nodes
   amiSelectorTerms:
-    - alias: "bottlerocket@BR_VERSION_PLACEHOLDER"
+    - alias: "bottlerocket@latest"
   
   subnetSelectorTerms:
     - tags:
-        karpenter.sh/discovery: "kedify-on-eks-blueprint"
+        karpenter.sh/discovery: "${CLUSTER_NAME}"
   
   securityGroupSelectorTerms:
     - tags:
-        karpenter.sh/discovery: "kedify-on-eks-blueprint"
+        karpenter.sh/discovery: "${CLUSTER_NAME}"
   
+  # Bottlerocket requires TWO block devices:
+  # - /dev/xvda: Control volume (OS)
+  # - /dev/xvdb: Data volume with PRE-CACHED container images from snapshot
+  # Using a snapshot eliminates container image pull time entirely
   blockDeviceMappings:
     - deviceName: /dev/xvda
       ebs:
-        volumeSize: 50Gi
+        volumeSize: 4Gi
         volumeType: gp3
+        encrypted: true
         deleteOnTermination: true
-    
-    # Data volume with container images pre-cached (from snapshot)
-    # Model weights are stored in EFS, not here
     - deviceName: /dev/xvdb
       ebs:
         volumeSize: 50Gi
         volumeType: gp3
         iops: 3000
         throughput: 125
-        deleteOnTermination: false
         encrypted: true
-        snapshotID: snap-0YOUR_SNAPSHOT_ID
+        deleteOnTermination: true
+        # ⭐ EBS snapshot with pre-cached vLLM container image
+        # This eliminates container pull time - image is already on disk
+        snapshotID: "${SNAPSHOT_ID}"
   
-  # Bottlerocket uses TOML for userData
+  # Bottlerocket userData configuration
   userData: |
     [settings.kubernetes]
     allowed-unsafe-sysctls = ["net.core.somaxconn"]
   
   tags:
-    Name: karpenter-gpu-optimized
+    Name: karpenter-gpu-snapshot
     intent: inference

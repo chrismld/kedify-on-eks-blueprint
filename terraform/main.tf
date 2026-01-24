@@ -71,13 +71,14 @@ module "eks" {
         service_account = "ebs-csi-controller-sa"
       }]
     }
-    aws-efs-csi-driver = {
-      most_recent = true
-      pod_identity_association = [{
-        role_arn        = module.aws_efs_csi_pod_identity.iam_role_arn
-        service_account = "efs-csi-controller-sa"
-      }]
-    }
+    # EFS CSI driver removed - using S3 for model storage instead
+    # aws-efs-csi-driver = {
+    #   most_recent = true
+    #   pod_identity_association = [{
+    #     role_arn        = module.aws_efs_csi_pod_identity.iam_role_arn
+    #     service_account = "efs-csi-controller-sa"
+    #   }]
+    # }
     coredns = {
       most_recent = true
     }

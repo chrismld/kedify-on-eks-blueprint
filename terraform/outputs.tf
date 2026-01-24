@@ -33,10 +33,7 @@ output "region" {
   value       = var.region
 }
 
-output "efs_filesystem_id" {
-  description = "EFS filesystem ID for model storage"
-  value       = aws_efs_file_system.models.id
-}
+
 
 output "project_name" {
   description = "Project name"
