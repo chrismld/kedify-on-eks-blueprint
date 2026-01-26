@@ -167,7 +167,9 @@ SESSION_STARTUP_MAX=""
 LAST_TOKENS_TOTAL=0
 LAST_TOKENS_TIME=0
 
-# RPS estimation state is defined near the get_queue_depth function
+# RPS tracking for requests/s calculation
+LAST_REQUESTS_TOTAL=0
+LAST_REQUESTS_TIME=0
 
 # Graph update timing (add point every GRAPH_UPDATE_INTERVAL seconds)
 LAST_GRAPH_UPDATE=0
@@ -1009,9 +1011,10 @@ get_otel_metrics_raw() {
 # parse_metric_from_raw - Parse a specific metric from raw Prometheus output
 # Parameters:
 #   $1 - Raw metrics output
-#   $2 - Metric name to parse
+#   $2 - Metric name to parse (use underscore format, will also match colons)
 #   $3 - (optional) "sum" to sum all values, "first" to get first value
 # Returns: Metric value, or empty string if not found
+# Note: Handles both underscore (vllm_metric) and colon (vllm:metric) formats
 # -----------------------------------------------------------------------------
 parse_metric_from_raw() {
     local raw_metrics="$1"
@@ -1022,13 +1025,27 @@ parse_metric_from_raw() {
     local found=false
     local first_value=""
     
+    # Create colon variant by replacing first underscore with colon
+    # e.g., vllm_request_success_total -> vllm:request_success_total
+    local colon_name="${metric_name/_/:}"
+    
     while IFS= read -r line; do
         # Skip comments and empty lines
         [[ "$line" =~ ^# ]] && continue
         [[ -z "$line" ]] && continue
         
-        # Match metric lines (metric_name{labels} value or metric_name value [timestamp])
-        if [[ "$line" =~ ^${metric_name}(\{|[[:space:]]) ]]; then
+        # Check if line starts with either metric name variant
+        local match=false
+        case "$line" in
+            "${metric_name}{"*|"${metric_name} "*)
+                match=true
+                ;;
+            "${colon_name}{"*|"${colon_name} "*)
+                match=true
+                ;;
+        esac
+        
+        if [[ "$match" == "true" ]]; then
             # Extract the numeric value (second-to-last field if timestamp present, else last)
             # OTel Prometheus format: metric{labels} value timestamp
             # Standard format: metric{labels} value
@@ -1186,10 +1203,12 @@ get_node_info() {
 # -----------------------------------------------------------------------------
 get_performance_metrics() {
     local throughput="N/A"
-    local p50="N/A"
-    local p95="N/A"
-    local p99="N/A"
-    local avg="N/A"
+    local ttft_p50="N/A"
+    local ttft_p95="N/A"
+    local e2e_avg="N/A"
+    local e2e_p50="N/A"
+    local e2e_p95="N/A"
+    local tokens_per_req="N/A"
     local request_count=0
     local tokens_per_sec="N/A"
     
@@ -1205,17 +1224,42 @@ get_performance_metrics() {
             request_count=$total_requests
         fi
         
-        # Get running requests as a proxy for throughput
+        # Calculate actual RPS from rate of change of vllm_request_success_total
+        local current_time=$(date +%s)
+        
+        # Load previous state from file
+        if [[ -f /tmp/dashboard-state.txt ]]; then
+            source /tmp/dashboard-state.txt
+        fi
+        
+        if [[ -n "$total_requests" ]] && [[ "$total_requests" =~ ^[0-9]+$ ]]; then
+            if [[ $LAST_REQUESTS_TIME -gt 0 ]] && [[ $LAST_REQUESTS_TOTAL -gt 0 ]]; then
+                local time_diff=$((current_time - LAST_REQUESTS_TIME))
+                local request_diff=$((total_requests - LAST_REQUESTS_TOTAL))
+                if [[ $time_diff -gt 0 ]] && [[ $request_diff -ge 0 ]]; then
+                    throughput=$((request_diff / time_diff))
+                fi
+            else
+                # First iteration - set to 0 instead of N/A
+                throughput=0
+            fi
+            # Save state to file
+            echo "LAST_REQUESTS_TOTAL=$total_requests" > /tmp/dashboard-state.txt
+            echo "LAST_REQUESTS_TIME=$current_time" >> /tmp/dashboard-state.txt
+        fi
+        
+        # Get running requests to check if there's active load (optional metric)
         local running_requests
         running_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_running" "sum")
-        if [[ -n "$running_requests" ]] && [[ "$running_requests" =~ ^[0-9]+$ ]]; then
-            throughput=$running_requests
-        fi
         
         # Calculate tokens/s from generation_tokens_total (rate over time)
         local current_tokens
         current_tokens=$(parse_metric_from_raw "$raw_metrics" "vllm_generation_tokens_total" "sum")
-        local current_time=$(date +%s)
+        
+        # Load token state from file
+        if [[ -f /tmp/dashboard-state.txt ]]; then
+            source /tmp/dashboard-state.txt
+        fi
         
         if [[ -n "$current_tokens" ]] && [[ "$current_tokens" =~ ^[0-9]+$ ]]; then
             if [[ $LAST_TOKENS_TIME -gt 0 ]] && [[ $LAST_TOKENS_TOTAL -gt 0 ]]; then
@@ -1225,39 +1269,48 @@ get_performance_metrics() {
                     tokens_per_sec=$((token_diff / time_diff))
                 fi
             fi
-            # Update tracking variables (these are global)
-            LAST_TOKENS_TOTAL=$current_tokens
-            LAST_TOKENS_TIME=$current_time
+            # Save token state to file
+            echo "LAST_TOKENS_TOTAL=$current_tokens" >> /tmp/dashboard-state.txt
+            echo "LAST_TOKENS_TIME=$current_time" >> /tmp/dashboard-state.txt
         fi
         
-        # Get waiting requests to check if there's active load
+        # Calculate tokens per request (generation + prompt tokens / total requests)
+        local prompt_tokens
+        prompt_tokens=$(parse_metric_from_raw "$raw_metrics" "vllm_prompt_tokens_total" "sum")
+        if [[ -n "$current_tokens" ]] && [[ "$current_tokens" =~ ^[0-9]+$ ]] && \
+           [[ -n "$prompt_tokens" ]] && [[ "$prompt_tokens" =~ ^[0-9]+$ ]] && \
+           [[ -n "$total_requests" ]] && [[ "$total_requests" =~ ^[0-9]+$ ]] && [[ "$total_requests" -gt 0 ]]; then
+            tokens_per_req=$(( (current_tokens + prompt_tokens) / total_requests ))
+        fi
+        
+        # Get waiting requests to check if there's active load (optional metric)
         local waiting_requests
         waiting_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_waiting" "sum")
         
-        # Only show latency if there are active requests (running > 0 or waiting > 0)
-        # This prevents showing stale histogram data when the system is idle
+        # Determine if there's active load - use throughput as primary indicator
+        # Fall back to queue metrics if available
         local has_active_load=false
-        if [[ -n "$running_requests" ]] && [[ "$running_requests" =~ ^[0-9]+$ ]] && [[ "$running_requests" -gt 0 ]]; then
+        if [[ "$throughput" =~ ^[0-9]+$ ]] && [[ "$throughput" -gt 0 ]]; then
             has_active_load=true
-        fi
-        if [[ -n "$waiting_requests" ]] && [[ "$waiting_requests" =~ ^[0-9]+$ ]] && [[ "$waiting_requests" -gt 0 ]]; then
+        elif [[ -n "$running_requests" ]] && [[ "$running_requests" =~ ^[0-9]+$ ]] && [[ "$running_requests" -gt 0 ]]; then
+            has_active_load=true
+        elif [[ -n "$waiting_requests" ]] && [[ "$waiting_requests" =~ ^[0-9]+$ ]] && [[ "$waiting_requests" -gt 0 ]]; then
             has_active_load=true
         fi
         
-        # Parse latency histogram buckets for percentiles (only if there's active load)
-        # vllm_e2e_request_latency_seconds_bucket{le="X"} gives cumulative counts
-        # Note: OTel may expose as vllm_e2e... or vllm:e2e... depending on transform
+        # Parse TTFT histogram buckets for percentiles (only if there's active load)
+        # vllm_time_to_first_token_seconds_bucket{le="X"} gives cumulative counts
         if [[ "$has_active_load" == "true" ]]; then
-            local latency_data=""
+            local ttft_data=""
             while IFS= read -r line; do
-                if [[ "$line" =~ ^vllm[_:]e2e_request_latency_seconds_bucket ]]; then
-                    latency_data+="$line"$'\n'
+                if [[ "$line" =~ ^vllm[_:]time_to_first_token_seconds_bucket ]]; then
+                    ttft_data+="$line"$'\n'
                 fi
             done <<< "$raw_metrics"
         
-            if [[ -n "$latency_data" ]]; then
+            if [[ -n "$ttft_data" ]]; then
                 # Parse histogram buckets to estimate percentiles
-                # Format: vllm_e2e_request_latency_seconds_bucket{le="0.5",...} count
+                # Format: vllm_time_to_first_token_seconds_bucket{le="0.5",...} count
                 local -a buckets=()
                 local -a counts=()
                 local total_count=0
@@ -1274,13 +1327,12 @@ get_performance_metrics() {
                             total_count=$count  # Last bucket is total
                         fi
                     fi
-                done <<< "$latency_data"
+                done <<< "$ttft_data"
             
                 # Calculate percentiles from histogram
                 if [[ $total_count -gt 0 ]] && [[ ${#buckets[@]} -gt 0 ]]; then
                     local p50_target=$((total_count * 50 / 100))
                     local p95_target=$((total_count * 95 / 100))
-                    local p99_target=$((total_count * 99 / 100))
                 
                     for i in "${!buckets[@]}"; do
                         local bucket_le="${buckets[$i]}"
@@ -1290,14 +1342,11 @@ get_performance_metrics() {
                         local ms_value=$(echo "$bucket_le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
                         [[ -z "$ms_value" ]] && ms_value=0
                     
-                        if [[ "$p50" == "N/A" ]] && [[ $bucket_count -ge $p50_target ]]; then
-                            p50=$ms_value
+                        if [[ "$ttft_p50" == "N/A" ]] && [[ $bucket_count -ge $p50_target ]]; then
+                            ttft_p50=$ms_value
                         fi
-                        if [[ "$p95" == "N/A" ]] && [[ $bucket_count -ge $p95_target ]]; then
-                            p95=$ms_value
-                        fi
-                        if [[ "$p99" == "N/A" ]] && [[ $bucket_count -ge $p99_target ]]; then
-                            p99=$ms_value
+                        if [[ "$ttft_p95" == "N/A" ]] && [[ $bucket_count -ge $p95_target ]]; then
+                            ttft_p95=$ms_value
                         fi
                     done
                 fi
@@ -1326,18 +1375,73 @@ get_performance_metrics() {
             done <<< "$raw_metrics"
             
             if [[ -n "$latency_sum" ]] && [[ -n "$latency_count" ]] && [[ "$latency_count" =~ ^[0-9]+$ ]] && [[ $latency_count -gt 0 ]]; then
-                # Calculate average in milliseconds
+                # Calculate average e2e latency in milliseconds
                 local avg_seconds
                 avg_seconds=$(echo "scale=3; $latency_sum / $latency_count" | bc 2>/dev/null)
                 if [[ -n "$avg_seconds" ]]; then
-                    avg=$(echo "$avg_seconds * 1000" | bc 2>/dev/null | cut -d'.' -f1)
-                    [[ -z "$avg" ]] && avg="N/A"
+                    e2e_avg=$(echo "$avg_seconds * 1000" | bc 2>/dev/null | cut -d'.' -f1)
+                    [[ -z "$e2e_avg" ]] && e2e_avg="N/A"
+                fi
+            fi
+            
+            # Calculate E2E p50 and p95 from histogram buckets
+            local e2e_data=""
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^vllm_e2e_request_latency_seconds_bucket ]]; then
+                    e2e_data+="$line"$'\n'
+                fi
+            done <<< "$raw_metrics"
+            
+            if [[ -n "$e2e_data" ]]; then
+                # Aggregate bucket counts across all pods
+                local -A bucket_totals
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    local le=$(echo "$line" | sed -n 's/.*le="\([^"]*\)".*/\1/p')
+                    local count=$(echo "$line" | awk '{print $(NF-1)}')
+                    if ! [[ "$count" =~ ^[0-9.]+$ ]]; then
+                        count=$(echo "$line" | awk '{print $NF}')
+                    fi
+                    if [[ "$le" != "+Inf" ]] && [[ -n "$count" ]] && [[ "$count" =~ ^[0-9]+$ ]]; then
+                        bucket_totals[$le]=$(( ${bucket_totals[$le]:-0} + count ))
+                    fi
+                done <<< "$e2e_data"
+                
+                # Sort buckets and find percentiles
+                local sorted_buckets=($(for k in "${!bucket_totals[@]}"; do echo "$k"; done | sort -n))
+                if [[ ${#sorted_buckets[@]} -gt 0 ]]; then
+                    local total_count="${bucket_totals[${sorted_buckets[-1]}]}"
+                    if [[ "$total_count" =~ ^[0-9]+$ ]] && [[ $total_count -gt 0 ]]; then
+                        local p50_target=$(( total_count / 2 ))
+                        local p95_target=$(( total_count * 95 / 100 ))
+                        
+                        for le in "${sorted_buckets[@]}"; do
+                            local count="${bucket_totals[$le]}"
+                            if [[ "$e2e_p50" == "N/A" ]] && [[ $count -ge $p50_target ]]; then
+                                e2e_p50=$(echo "$le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
+                            fi
+                            if [[ "$e2e_p95" == "N/A" ]] && [[ $count -ge $p95_target ]]; then
+                                e2e_p95=$(echo "$le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
+                            fi
+                        done
+                    fi
                 fi
             fi
         fi  # end has_active_load check
     fi
     
-    echo "${throughput}|${p50}|${p95}|${p99}|${avg}|${request_count}|${tokens_per_sec}"
+    # Output the metrics: throughput|ttft_p50|ttft_p95|e2e_avg|e2e_p50|e2e_p95|tokens_per_req|request_count|tokens_per_sec
+    echo "${throughput}|${ttft_p50}|${ttft_p95}|${e2e_avg}|${e2e_p50}|${e2e_p95}|${tokens_per_req}|${request_count}|${tokens_per_sec}"
+    
+    # Log tracking variables to file for debugging (not to stdout)
+    {
+        echo "$(date '+%H:%M:%S') - LAST_REQUESTS_TOTAL=$LAST_REQUESTS_TOTAL"
+        echo "$(date '+%H:%M:%S') - LAST_REQUESTS_TIME=$LAST_REQUESTS_TIME"
+        echo "$(date '+%H:%M:%S') - LAST_TOKENS_TOTAL=$LAST_TOKENS_TOTAL"
+        echo "$(date '+%H:%M:%S') - LAST_TOKENS_TIME=$LAST_TOKENS_TIME"
+        echo "$(date '+%H:%M:%S') - throughput=$throughput"
+    } >> /tmp/dashboard-debug.log 2>&1
+    
     return 0
 }
 
@@ -1814,23 +1918,16 @@ render_nodes_section() {
 render_performance_section() {
     local throughput="${METRIC_THROUGHPUT:-N/A}"
     local tokens_per_sec="${METRIC_TOKENS_PER_SEC:-N/A}"
-    local p50="${METRIC_RESPONSE_P50:-N/A}"
-    local p95="${METRIC_RESPONSE_P95:-N/A}"
-    local p99="${METRIC_RESPONSE_P99:-N/A}"
-    local avg="${METRIC_RESPONSE_AVG:-N/A}"
+    local tokens_per_req="${METRIC_TOKENS_PER_REQ:-N/A}"
+    local ttft_p50="${METRIC_TTFT_P50:-N/A}"
+    local ttft_p95="${METRIC_TTFT_P95:-N/A}"
     
     # Get colors for each metric
     local throughput_color
     throughput_color=$(determine_status_color "throughput" "$throughput")
     
-    local p50_color
-    p50_color=$(determine_status_color "response" "$p50")
-    
-    local p95_color
-    p95_color=$(determine_status_color "response" "$p95")
-    
-    local p99_color
-    p99_color=$(determine_status_color "response" "$p99")
+    local ttft_color
+    ttft_color=$(determine_status_color "response" "$ttft_p50")
     
     # Add stale indicator if needed
     local stale_marker=""
@@ -1838,14 +1935,17 @@ render_performance_section() {
         stale_marker=" ${COLOR_WARNING}${INDICATOR_WARNING}${NC}"
     fi
     
-    # Format values with units (keep short, convert large ms to seconds)
+    # Format values with units
     local throughput_display="$throughput"
     [[ "$throughput" != "N/A" ]] && throughput_display="${throughput}"
     
     local tokens_display="$tokens_per_sec"
     [[ "$tokens_per_sec" != "N/A" ]] && tokens_display="${tokens_per_sec}"
     
-    # Helper to format latency (convert to seconds if >= 1000ms to keep short)
+    local tokens_req_display="$tokens_per_req"
+    [[ "$tokens_per_req" != "N/A" ]] && tokens_req_display="${tokens_per_req}"
+    
+    # Helper to format latency
     format_latency() {
         local val="$1"
         if [[ "$val" == "N/A" ]]; then
@@ -1853,7 +1953,6 @@ render_performance_section() {
         elif [[ "$val" -ge 10000 ]]; then
             echo "$((val / 1000))s"
         elif [[ "$val" -ge 1000 ]]; then
-            # Show as X.Xs for values 1000-9999
             local secs=$((val / 1000))
             local tenths=$(( (val % 1000) / 100 ))
             echo "${secs}.${tenths}s"
@@ -1862,31 +1961,39 @@ render_performance_section() {
         fi
     }
     
-    local p50_display=$(format_latency "$p50")
-    local p95_display=$(format_latency "$p95")
-    local p99_display=$(format_latency "$p99")
-    local avg_display=$(format_latency "$avg")
-    
-    local avg_color
-    avg_color=$(determine_status_color "response" "$avg")
+    local ttft_p50_display=$(format_latency "$ttft_p50")
+    local ttft_p95_display=$(format_latency "$ttft_p95")
     
     # Section header (78 inner + 2 borders = 80)
     printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} Performance ${NC}${BOLD_CYAN}"
     for ((i=0; i<64; i++)); do printf "${BOX_L_H}"; done
     printf "${BOX_L_TR}${NC}\n"
     
-    # RPS and Tokens/s line (fit in 78 chars)
-    # Calculate padding based on stale marker presence (stale marker is 2 chars: space + ⚠)
+    # Performance metrics - two lines
     local stale_padding=0
     [[ "$STALE_PERFORMANCE" == "true" ]] && stale_padding=2
     
-    printf "${BOLD_CYAN}${BOX_L_V}${NC} RPS: ${throughput_color}${BOLD}%-3s${NC}${stale_marker}" "$throughput_display"
-    printf " ${COLOR_MUTED}|${NC} Tok/s: ${COLOR_INFO}%-4s${NC}" "$tokens_display"
-    printf " ${COLOR_MUTED}|${NC} Avg: ${avg_color}%-5s${NC}" "$avg_display"
-    printf " ${COLOR_MUTED}|${NC} p50: ${p50_color}%-5s${NC}" "$p50_display"
-    printf " ${COLOR_MUTED}|${NC} p95: ${p95_color}%-5s${NC}" "$p95_display"
-    printf " ${COLOR_MUTED}|${NC} p99: ${p99_color}%-5s${NC}%*s" "$p99_display" "$((3 - stale_padding))" ""
-    printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
+    # Get e2e displays
+    local e2e_avg_display="${METRIC_E2E_AVG:-N/A}"
+    [[ "$e2e_avg_display" != "N/A" ]] && e2e_avg_display="${e2e_avg_display}ms"
+    local e2e_p50_display="${METRIC_E2E_P50:-N/A}"
+    [[ "$e2e_p50_display" != "N/A" ]] && e2e_p50_display="${e2e_p50_display}ms"
+    local e2e_p95_display="${METRIC_E2E_P95:-N/A}"
+    [[ "$e2e_p95_display" != "N/A" ]] && e2e_p95_display="${e2e_p95_display}ms"
+    
+    # Line 1: "│ RPS: 20   | Tok/Sec: 1661  | TTFT p50: 45ms  | p95: 120ms          │"
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} RPS: ${throughput_color}${BOLD}%-4s${NC}${stale_marker}" "$throughput_display"
+    printf " ${COLOR_MUTED}|${NC} Tok/Sec: ${COLOR_INFO}%-5s${NC}" "$tokens_display"
+    printf " ${COLOR_MUTED}|${NC} TTFT p50: ${ttft_color}%-6s${NC}" "$ttft_p50_display"
+    printf " ${COLOR_MUTED}|${NC} p95: ${ttft_color}%-6s${NC}" "$ttft_p95_display"
+    printf "%*s${BOLD_CYAN}${BOX_L_V}${NC}\n" "$((18 - stale_padding))" ""
+    
+    # Line 2: "│ E2E Avg: 1607ms | p50: 1500ms | p95: 2000ms | Tok/Req: 83           │"
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} E2E Avg: ${COLOR_INFO}%-6s${NC}" "$e2e_avg_display"
+    printf " ${COLOR_MUTED}|${NC} p50: ${COLOR_INFO}%-6s${NC}" "$e2e_p50_display"
+    printf " ${COLOR_MUTED}|${NC} p95: ${COLOR_INFO}%-6s${NC}" "$e2e_p95_display"
+    printf " ${COLOR_MUTED}|${NC} Tok/Req: ${COLOR_INFO}%-3s${NC}" "$tokens_req_display"
+    printf "%*s${BOLD_CYAN}${BOX_L_V}${NC}\n" "19" ""
     
     # Section footer
     printf "${BOLD_CYAN}${BOX_L_BL}"
@@ -2345,15 +2452,18 @@ collect_all_metrics_async() {
         fi
         
         # Process performance metrics
-        if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
+        if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
             local throughput=$(echo "$perf_metrics" | cut -d'|' -f1)
-            local tokens_per_sec=$(echo "$perf_metrics" | cut -d'|' -f7)
+            local tokens_per_sec=$(echo "$perf_metrics" | cut -d'|' -f9)
+            local tokens_per_req=$(echo "$perf_metrics" | cut -d'|' -f7)
             echo "METRIC_THROUGHPUT='$throughput'"
             echo "METRIC_TOKENS_PER_SEC='$tokens_per_sec'"
-            echo "METRIC_RESPONSE_P50='$(echo "$perf_metrics" | cut -d'|' -f2)'"
-            echo "METRIC_RESPONSE_P95='$(echo "$perf_metrics" | cut -d'|' -f3)'"
-            echo "METRIC_RESPONSE_P99='$(echo "$perf_metrics" | cut -d'|' -f4)'"
-            echo "METRIC_RESPONSE_AVG='$(echo "$perf_metrics" | cut -d'|' -f5)'"
+            echo "METRIC_TOKENS_PER_REQ='$tokens_per_req'"
+            echo "METRIC_TTFT_P50='$(echo "$perf_metrics" | cut -d'|' -f2)'"
+            echo "METRIC_TTFT_P95='$(echo "$perf_metrics" | cut -d'|' -f3)'"
+            echo "METRIC_E2E_AVG='$(echo "$perf_metrics" | cut -d'|' -f4)'"
+            echo "METRIC_E2E_P50='$(echo "$perf_metrics" | cut -d'|' -f5)'"
+            echo "METRIC_E2E_P95='$(echo "$perf_metrics" | cut -d'|' -f6)'"
             [[ "$throughput" != "N/A" ]] && echo "LAST_GOOD_THROUGHPUT='$throughput'"
             [[ "$tokens_per_sec" != "N/A" ]] && echo "LAST_GOOD_TOKENS_PER_SEC='$tokens_per_sec'"
             echo "STALE_PERFORMANCE=false"
