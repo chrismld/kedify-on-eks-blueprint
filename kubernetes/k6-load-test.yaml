@@ -28,8 +28,8 @@ data:
           startVUs: 10,
           stages: [
             { duration: '30s', target: 50 },
-            { duration: '60s', target: 100 },
-            { duration: '60s', target: 100 },
+            { duration: '120s', target: 100 },
+            { duration: '120s', target: 100 },
             { duration: '30s', target: 0 },
           ],
         },

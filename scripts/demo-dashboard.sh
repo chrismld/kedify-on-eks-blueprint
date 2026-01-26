@@ -72,11 +72,12 @@ CLEAR_LINE='\033[2K'
 # Refresh and Timing
 REFRESH_INTERVAL=2               # Seconds between updates
 STARTUP_RETRY_INTERVAL=5         # Seconds between connection retries
+GRAPH_UPDATE_INTERVAL=4          # Seconds between graph data points (every 2 refreshes)
 
 # Graph Dimensions
-GRAPH_WIDTH=50                   # Width of ASCII graph in characters
+GRAPH_WIDTH=73                   # Width of ASCII graph in characters
 GRAPH_HEIGHT=10                  # Height of ASCII graph in lines
-MAX_HISTORY_SIZE=60              # Rolling window size for load history
+MAX_HISTORY_SIZE=75              # Rolling window size (~5 min at 4s intervals)
 
 # Terminal Layout
 TERMINAL_WIDTH=80                # Maximum terminal width
@@ -127,9 +128,19 @@ METRIC_QUEUE_DEPTH=0
 METRIC_PODS_RUNNING=0
 METRIC_PODS_DESIRED=0
 METRIC_PODS_READY=0
+METRIC_PODS_PENDING=0
+METRIC_PODS_NOT_READY=0
+METRIC_POD_STARTUP_MIN="N/A"
+METRIC_POD_STARTUP_MAX="N/A"
 METRIC_NODES_COUNT=0
+METRIC_NODES_READY=0
+METRIC_NODES_PENDING=0
+METRIC_NODECLAIMS_PENDING=0
+METRIC_NODES_ONDEMAND=0
+METRIC_NODES_SPOT=0
 METRIC_NODE_TYPE="N/A"
 METRIC_THROUGHPUT=0
+METRIC_TOKENS_PER_SEC=0
 METRIC_RESPONSE_P50=0
 METRIC_RESPONSE_P95=0
 METRIC_RESPONSE_P99=0
@@ -146,10 +157,20 @@ LAST_GOOD_PODS_READY=0
 LAST_GOOD_NODES_COUNT=0
 LAST_GOOD_NODE_TYPE="N/A"
 LAST_GOOD_THROUGHPUT=0
+LAST_GOOD_TOKENS_PER_SEC=0
 
-# RPS calculation state (track request count over time)
-LAST_REQUEST_COUNT=0
-LAST_REQUEST_TIME=0
+# Session-persistent startup times (only reset on dashboard start, not when pods scale down)
+SESSION_STARTUP_MIN=""
+SESSION_STARTUP_MAX=""
+
+# Token tracking for tokens/s calculation
+LAST_TOKENS_TOTAL=0
+LAST_TOKENS_TIME=0
+
+# RPS estimation state is defined near the get_queue_depth function
+
+# Graph update timing (add point every GRAPH_UPDATE_INTERVAL seconds)
+LAST_GRAPH_UPDATE=0
 
 # Stale indicators (true if data might be stale)
 STALE_QUEUE_DEPTH=false
@@ -666,12 +687,13 @@ strip_ansi() {
 # Parameters:
 #   None (uses global LOAD_HISTORY array)
 # Output:
-#   Prints GRAPH_HEIGHT lines of GRAPH_WIDTH characters to stdout
-#   Each line represents a horizontal slice of the graph
+#   Prints GRAPH_HEIGHT+2 lines (graph + x-axis) to stdout
+#   Includes Y-axis label and max value, X-axis shows current time
 # Notes:
 #   - Graph is rendered top-to-bottom (highest values at top)
-#   - Shows an AREA graph with filled bars and line on top
-#   - Scales values to fit within GRAPH_HEIGHT
+#   - Shows an AREA graph with filled bars
+#   - Y-axis shows "RPS" and max scale value
+#   - X-axis shows current MM:SS timestamp
 # -----------------------------------------------------------------------------
 build_ascii_graph() {
     local -a history=("${LOAD_HISTORY[@]}")
@@ -727,22 +749,38 @@ build_ascii_graph() {
     done
     
     # Build the graph line by line (top to bottom)
-    # Use solid blocks for filled area chart with dot grid background
+    # First line shows max value on Y-axis
     local line
+    local row_count=0
     for (( row = height; row >= 1; row-- )); do
+        row_count=$((row_count + 1))
         line=""
         for (( col = 0; col < width; col++ )); do
             local bar_height=${row_for_col[$col]}
             if [[ $bar_height -ge $row ]]; then
-                # Fill the area under the curve with solid block
                 line+="█"
             else
-                # Empty space above the curve - use dots for grid
                 line+="·"
             fi
         done
-        echo "$line"
+        
+        # Add Y-axis label on first row (max value only)
+        # Cap display value to 3 chars (use 'k' suffix for thousands)
+        if [[ $row_count -eq 1 ]]; then
+            if [[ $max_value -ge 1000 ]]; then
+                local display_max=$((max_value / 1000))
+                printf "%2dk│%s\n" "$display_max" "$line"
+            else
+                printf "%3d│%s\n" "$max_value" "$line"
+            fi
+        else
+            printf "   │%s\n" "$line"
+        fi
     done
+    
+    # X-axis line with current time (HH:MM:SS)
+    local current_time=$(date '+%H:%M:%S')
+    printf "   └%s %s\n" "$(printf '─%.0s' $(seq 1 $((width - 9))))" "$current_time"
 }
 
 # =============================================================================
@@ -753,114 +791,317 @@ build_ascii_graph() {
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# get_vllm_pods - Query vLLM deployment status
+# get_vllm_pods - Query vLLM deployment and pod status
 # Requirements: 3.1, 3.2, 3.3, 8.1
-# Returns: running|desired|ready pipe-separated values, or "N/A|N/A|N/A" on failure
+# Returns: running|desired|ready|pending|not_ready pipe-separated values
+# Pod states: Ready (1/1), NotReady (not 1/1 but running), Pending (not scheduled)
 # -----------------------------------------------------------------------------
 get_vllm_pods() {
-    local deployment_info
-    local running=0
     local desired=0
     local ready=0
+    local pending=0
+    local not_ready=0
+    # Use session-persistent values as starting point (don't reset when pods scale down)
+    local startup_min="$SESSION_STARTUP_MIN"
+    local startup_max="$SESSION_STARTUP_MAX"
     
-    # Query deployment status using kubectl
-    # Format: DESIRED READY UP-TO-DATE AVAILABLE
+    # Query deployment for desired replicas
+    local deployment_info
     deployment_info=$(kubectl get deployment "$VLLM_DEPLOYMENT" \
         -n "$VLLM_NAMESPACE" \
-        -o jsonpath='{.spec.replicas}|{.status.readyReplicas}|{.status.availableReplicas}' \
+        -o jsonpath='{.spec.replicas}|{.status.readyReplicas}' \
         2>/dev/null)
     
     if [[ $? -ne 0 ]] || [[ -z "$deployment_info" ]]; then
         log_error "Failed to get vLLM deployment status"
-        echo "N/A|N/A|N/A"
+        echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A"
         return 1
     fi
     
-    # Parse the pipe-separated values
     desired=$(echo "$deployment_info" | cut -d'|' -f1)
     ready=$(echo "$deployment_info" | cut -d'|' -f2)
-    local available=$(echo "$deployment_info" | cut -d'|' -f3)
-    
-    # Handle null/empty values from jsonpath (when replicas are 0 or not set)
     [[ -z "$desired" ]] && desired=0
     [[ -z "$ready" ]] && ready=0
-    [[ -z "$available" ]] && available=0
     
-    # Get actual running pods count (pods in Running phase)
-    running=$(kubectl get pods -n "$VLLM_NAMESPACE" \
-        -l "$VLLM_LABEL" \
-        --field-selector=status.phase=Running \
-        -o name 2>/dev/null | wc -l | tr -d ' ')
+    # Query individual pod statuses and startup times
+    local pod_data
+    pod_data=$(kubectl get pods -n "$VLLM_NAMESPACE" -l "$VLLM_LABEL" \
+        -o jsonpath='{range .items[*]}{.status.phase}|{.status.containerStatuses[0].ready}|{.status.conditions[?(@.type=="PodScheduled")].lastTransitionTime}|{.status.conditions[?(@.type=="Ready")].lastTransitionTime}{"\n"}{end}' \
+        2>/dev/null)
     
-    if [[ $? -ne 0 ]] || [[ -z "$running" ]]; then
-        # Fall back to available count if pod query fails
-        running=$available
+    if [[ -n "$pod_data" ]]; then
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local phase=$(echo "$line" | cut -d'|' -f1)
+            local container_ready=$(echo "$line" | cut -d'|' -f2)
+            local scheduled_time=$(echo "$line" | cut -d'|' -f3)
+            local ready_time=$(echo "$line" | cut -d'|' -f4)
+            
+            case "$phase" in
+                "Running")
+                    if [[ "$container_ready" == "true" ]]; then
+                        # Calculate startup time for ready pods (1/1 state)
+                        if [[ -n "$scheduled_time" ]] && [[ -n "$ready_time" ]] && [[ "$scheduled_time" != "null" ]] && [[ "$ready_time" != "null" ]]; then
+                            # Handle both macOS and Linux date parsing
+                            local scheduled_epoch=""
+                            local ready_epoch=""
+                            
+                            # Try macOS format first, then Linux
+                            if [[ "$OSTYPE" == "darwin"* ]]; then
+                                scheduled_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$scheduled_time" "+%s" 2>/dev/null)
+                                ready_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%s" 2>/dev/null)
+                            else
+                                scheduled_epoch=$(date -d "$scheduled_time" "+%s" 2>/dev/null)
+                                ready_epoch=$(date -d "$ready_time" "+%s" 2>/dev/null)
+                            fi
+                            
+                            if [[ -n "$scheduled_epoch" ]] && [[ -n "$ready_epoch" ]] && [[ "$scheduled_epoch" =~ ^[0-9]+$ ]] && [[ "$ready_epoch" =~ ^[0-9]+$ ]]; then
+                                local startup_secs=$((ready_epoch - scheduled_epoch))
+                                if [[ $startup_secs -ge 0 ]]; then
+                                    # Update min if empty or new value is smaller
+                                    if [[ -z "$startup_min" ]] || [[ ! "$startup_min" =~ ^[0-9]+$ ]] || [[ $startup_secs -lt $startup_min ]]; then
+                                        startup_min=$startup_secs
+                                    fi
+                                    # Update max if empty or new value is larger
+                                    if [[ -z "$startup_max" ]] || [[ ! "$startup_max" =~ ^[0-9]+$ ]] || [[ $startup_secs -gt $startup_max ]]; then
+                                        startup_max=$startup_secs
+                                    fi
+                                fi
+                            fi
+                        fi
+                    else
+                        not_ready=$((not_ready + 1))
+                    fi
+                    ;;
+                "Pending")
+                    pending=$((pending + 1))
+                    ;;
+            esac
+        done <<< "$pod_data"
     fi
     
-    echo "${running}|${desired}|${ready}"
+    # Calculate running as ready + not_ready (excludes pending)
+    local running=$((ready + not_ready))
+    
+    # Update session-persistent values (only if we found new data)
+    if [[ -n "$startup_min" ]] && [[ "$startup_min" =~ ^[0-9]+$ ]]; then
+        SESSION_STARTUP_MIN="$startup_min"
+    fi
+    if [[ -n "$startup_max" ]] && [[ "$startup_max" =~ ^[0-9]+$ ]]; then
+        SESSION_STARTUP_MAX="$startup_max"
+    fi
+    
+    # Format startup times for output (use session values, N/A if not available)
+    local output_min="${SESSION_STARTUP_MIN:-N/A}"
+    local output_max="${SESSION_STARTUP_MAX:-N/A}"
+    [[ -z "$output_min" ]] && output_min="N/A"
+    [[ -z "$output_max" ]] && output_max="N/A"
+    
+    echo "${running}|${desired}|${ready}|${pending}|${not_ready}|${output_min}|${output_max}"
     return 0
 }
 
 # -----------------------------------------------------------------------------
-# get_queue_depth - Query KEDA/HPA for current vLLM queue depth metric
+# OTel Prometheus endpoint configuration
+# -----------------------------------------------------------------------------
+OTEL_PROMETHEUS_SERVICE="otel-vllm-metrics"
+OTEL_PROMETHEUS_NAMESPACE="keda"
+OTEL_PROMETHEUS_PORT=8889
+OTEL_LOCAL_PORT=18889
+OTEL_PORT_FORWARD_PID=""
+
+# -----------------------------------------------------------------------------
+# start_port_forward - Start kubectl port-forward to OTel Prometheus endpoint
+# Returns: 0 on success, 1 on failure
+# Side effects: Sets OTEL_PORT_FORWARD_PID with the background process ID
+# -----------------------------------------------------------------------------
+start_port_forward() {
+    # Check if port-forward is already running
+    if [[ -n "$OTEL_PORT_FORWARD_PID" ]] && kill -0 "$OTEL_PORT_FORWARD_PID" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Start port-forward in background
+    kubectl port-forward -n "$OTEL_PROMETHEUS_NAMESPACE" \
+        "svc/$OTEL_PROMETHEUS_SERVICE" \
+        "$OTEL_LOCAL_PORT:$OTEL_PROMETHEUS_PORT" \
+        >/dev/null 2>&1 &
+    OTEL_PORT_FORWARD_PID=$!
+    
+    # Wait briefly for port-forward to establish
+    sleep 0.5
+    
+    # Verify it's running
+    if kill -0 "$OTEL_PORT_FORWARD_PID" 2>/dev/null; then
+        log_info "Started port-forward to OTel Prometheus (PID: $OTEL_PORT_FORWARD_PID)"
+        return 0
+    else
+        OTEL_PORT_FORWARD_PID=""
+        log_error "Failed to start port-forward to OTel Prometheus"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# stop_port_forward - Stop the kubectl port-forward process
+# Side effects: Kills the port-forward process and clears OTEL_PORT_FORWARD_PID
+# -----------------------------------------------------------------------------
+stop_port_forward() {
+    if [[ -n "$OTEL_PORT_FORWARD_PID" ]]; then
+        kill "$OTEL_PORT_FORWARD_PID" 2>/dev/null
+        wait "$OTEL_PORT_FORWARD_PID" 2>/dev/null
+        log_info "Stopped port-forward (PID: $OTEL_PORT_FORWARD_PID)"
+        OTEL_PORT_FORWARD_PID=""
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# get_otel_metrics_raw - Get raw metrics from OTel Prometheus endpoint
+# Requirements: 2.1, 5.1, 8.1
+# Returns: Raw Prometheus metrics output, or empty string on failure
+# Note: Uses kubectl port-forward for fast, persistent connection
+# -----------------------------------------------------------------------------
+OTEL_METRICS_CACHE=""
+OTEL_METRICS_CACHE_TIME=0
+
+get_otel_metrics_raw() {
+    local current_time=$(date +%s)
+    
+    # Return cached result if less than 2 seconds old
+    if [[ -n "$OTEL_METRICS_CACHE" ]] && [[ $((current_time - OTEL_METRICS_CACHE_TIME)) -lt 2 ]]; then
+        echo "$OTEL_METRICS_CACHE"
+        return 0
+    fi
+    
+    # Ensure port-forward is running
+    if ! start_port_forward; then
+        return 1
+    fi
+    
+    # Query the local port-forwarded endpoint using curl
+    local metrics_output
+    metrics_output=$(curl -s --max-time 2 "http://localhost:$OTEL_LOCAL_PORT/metrics" 2>/dev/null)
+    
+    if [[ -n "$metrics_output" ]]; then
+        OTEL_METRICS_CACHE="$metrics_output"
+        OTEL_METRICS_CACHE_TIME=$current_time
+        echo "$metrics_output"
+        return 0
+    fi
+    
+    # Port-forward might have died, try to restart it
+    stop_port_forward
+    if start_port_forward; then
+        sleep 0.3
+        metrics_output=$(curl -s --max-time 2 "http://localhost:$OTEL_LOCAL_PORT/metrics" 2>/dev/null)
+        if [[ -n "$metrics_output" ]]; then
+            OTEL_METRICS_CACHE="$metrics_output"
+            OTEL_METRICS_CACHE_TIME=$current_time
+            echo "$metrics_output"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# parse_metric_from_raw - Parse a specific metric from raw Prometheus output
+# Parameters:
+#   $1 - Raw metrics output
+#   $2 - Metric name to parse
+#   $3 - (optional) "sum" to sum all values, "first" to get first value
+# Returns: Metric value, or empty string if not found
+# -----------------------------------------------------------------------------
+parse_metric_from_raw() {
+    local raw_metrics="$1"
+    local metric_name="$2"
+    local mode="${3:-sum}"
+    
+    local total=0
+    local found=false
+    local first_value=""
+    
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^# ]] && continue
+        [[ -z "$line" ]] && continue
+        
+        # Match metric lines (metric_name{labels} value or metric_name value [timestamp])
+        if [[ "$line" =~ ^${metric_name}(\{|[[:space:]]) ]]; then
+            # Extract the numeric value (second-to-last field if timestamp present, else last)
+            # OTel Prometheus format: metric{labels} value timestamp
+            # Standard format: metric{labels} value
+            local num_fields=$(echo "$line" | awk '{print NF}')
+            local value
+            if [[ $num_fields -ge 3 ]]; then
+                # Has timestamp, get second-to-last field
+                value=$(echo "$line" | awk '{print $(NF-1)}')
+            else
+                # No timestamp, get last field
+                value=$(echo "$line" | awk '{print $NF}')
+            fi
+            if [[ "$value" =~ ^[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$ ]]; then
+                found=true
+                if [[ "$mode" == "first" ]] && [[ -z "$first_value" ]]; then
+                    first_value="$value"
+                else
+                    # Convert to integer and add to total
+                    local int_value=${value%.*}
+                    # Handle scientific notation
+                    if [[ "$value" =~ [eE] ]]; then
+                        int_value=$(printf "%.0f" "$value" 2>/dev/null || echo "0")
+                    fi
+                    total=$((total + int_value))
+                fi
+            fi
+        fi
+    done <<< "$raw_metrics"
+    
+    if [[ "$found" == "true" ]]; then
+        if [[ "$mode" == "first" ]]; then
+            echo "$first_value"
+        else
+            echo "$total"
+        fi
+        return 0
+    fi
+    
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# get_queue_depth - Query OTel Prometheus for current vLLM queue depth metric
 # Requirements: 2.1, 8.1
-# Returns: integer queue depth value, or "N/A" on failure
+# Returns: integer queue depth value, or "0" on failure
+# Note: Uses OTel Prometheus endpoint (fast, <1 second)
 # -----------------------------------------------------------------------------
 get_queue_depth() {
     local queue_depth=""
     
-    # Method 1: Get directly from vLLM pod metrics (most reliable)
-    # Select only READY pods (not just Running) to ensure we can query metrics
-    local vllm_pod
-    vllm_pod=$(kubectl get pods -n "$VLLM_NAMESPACE" \
-        -l "$VLLM_LABEL" \
-        -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{" "}{.metadata.name}{"\n"}{end}' \
-        2>/dev/null | grep '^true ' | head -1 | awk '{print $2}')
+    # Get raw metrics from OTel Prometheus endpoint
+    local raw_metrics
+    raw_metrics=$(get_otel_metrics_raw 2>/dev/null)
     
-    if [[ -n "$vllm_pod" ]]; then
-        # Query the vLLM metrics endpoint (port 8000, not 8080)
-        local metrics_output
-        metrics_output=$(kubectl exec -n "$VLLM_NAMESPACE" "$vllm_pod" -- \
-            curl -s http://localhost:8000/metrics 2>/dev/null)
-        
-        if [[ -n "$metrics_output" ]]; then
-            # Try vllm:num_requests_waiting first (has labels like {engine="0",model_name="..."})
-            # Extract the numeric value after the closing brace
-            queue_depth=$(echo "$metrics_output" | \
-                grep 'vllm:num_requests_waiting{' | \
-                head -1 | \
-                sed 's/.*} //' | \
-                cut -d'.' -f1)
-            
-            if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
-                echo "$queue_depth"
-                return 0
-            fi
-            
-            # Try vllm:num_requests_running as fallback
-            queue_depth=$(echo "$metrics_output" | \
-                grep 'vllm:num_requests_running{' | \
-                head -1 | \
-                sed 's/.*} //' | \
-                cut -d'.' -f1)
-            
-            if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
-                echo "$queue_depth"
-                return 0
-            fi
+    if [[ -n "$raw_metrics" ]]; then
+        # Parse vllm_num_requests_waiting (sum across all pods)
+        queue_depth=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_waiting" "sum")
+        if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
+            echo "$queue_depth"
+            return 0
         fi
     fi
     
-    # Method 2: Try HPA metrics
+    # Fallback to HPA if OTel is not available
     local hpa_metrics
     hpa_metrics=$(kubectl get hpa "keda-hpa-vllm-queue-scaler" \
         -n "$VLLM_NAMESPACE" \
-        -o jsonpath='{.status.currentMetrics[0].external.current.value}' \
+        -o jsonpath='{.status.currentMetrics[0].external.current.averageValue}' \
         2>/dev/null)
     
     if [[ -n "$hpa_metrics" ]] && [[ "$hpa_metrics" != "null" ]]; then
         queue_depth=$(echo "$hpa_metrics" | sed 's/[^0-9.]//g' | cut -d'.' -f1)
-        if [[ -n "$queue_depth" ]]; then
+        if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
             echo "$queue_depth"
             return 0
         fi
@@ -874,38 +1115,74 @@ get_queue_depth() {
 # -----------------------------------------------------------------------------
 # get_node_info - Query kubectl for GPU nodes managed by Karpenter
 # Requirements: 4.1, 4.2, 8.1
-# Returns: node_count (just the count, simplified)
+# Returns: ready_count|pending_count|nodeclaims_pending|ondemand_count|spot_count pipe-separated values
+# Node states: Ready (green), NotReady/Pending (yellow), NodeClaim only (yellow)
 # -----------------------------------------------------------------------------
 get_node_info() {
-    local node_count=0
+    local ready_count=0
+    local pending_count=0
+    local nodeclaims_pending=0
+    local ondemand_count=0
+    local spot_count=0
     
-    # Query nodes with Karpenter nodepool label (gpu-inference)
-    node_count=$(kubectl get nodes \
+    # Query nodes with Karpenter nodepool label and get their status and capacity type
+    local node_data
+    node_data=$(kubectl get nodes \
+        -l "karpenter.sh/nodepool=gpu-inference" \
+        -o jsonpath='{range .items[*]}{.metadata.name}|{.status.conditions[?(@.type=="Ready")].status}|{.metadata.labels.karpenter\.sh/capacity-type}{"\n"}{end}' \
+        2>/dev/null)
+    
+    # If no nodes found with primary label, try alternative
+    if [[ -z "$node_data" ]]; then
+        node_data=$(kubectl get nodes \
+            -l "intent=gpu-inference" \
+            -o jsonpath='{range .items[*]}{.metadata.name}|{.status.conditions[?(@.type=="Ready")].status}|{.metadata.labels.karpenter\.sh/capacity-type}{"\n"}{end}' \
+            2>/dev/null)
+    fi
+    
+    # Count ready vs not-ready nodes and capacity types
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local status=$(echo "$line" | cut -d'|' -f2)
+        local capacity_type=$(echo "$line" | cut -d'|' -f3)
+        
+        if [[ "$status" == "True" ]]; then
+            ready_count=$((ready_count + 1))
+            # Count capacity types only for ready nodes
+            if [[ "$capacity_type" == "spot" ]]; then
+                spot_count=$((spot_count + 1))
+            else
+                ondemand_count=$((ondemand_count + 1))
+            fi
+        else
+            pending_count=$((pending_count + 1))
+        fi
+    done <<< "$node_data"
+    
+    # Check for pending NodeClaims (nodes being provisioned by Karpenter)
+    # NodeClaims exist before the actual Node is created
+    local nodeclaim_count=0
+    local node_count=$((ready_count + pending_count))
+    
+    nodeclaim_count=$(kubectl get nodeclaims \
         -l "karpenter.sh/nodepool=gpu-inference" \
         -o name 2>/dev/null | wc -l | tr -d ' ')
     
-    if [[ $node_count -eq 0 ]]; then
-        # Try alternative label selector (intent=gpu-inference)
-        node_count=$(kubectl get nodes \
-            -l "intent=gpu-inference" \
-            -o name 2>/dev/null | wc -l | tr -d ' ')
+    # Pending nodeclaims = nodeclaims that don't have a corresponding node yet
+    if [[ $nodeclaim_count -gt $node_count ]]; then
+        nodeclaims_pending=$((nodeclaim_count - node_count))
     fi
     
-    if [[ $node_count -eq 0 ]]; then
-        # Try with nvidia.com/gpu resource
-        node_count=$(kubectl get nodes \
-            -o jsonpath='{range .items[?(@.status.capacity.nvidia\.com/gpu)]}{.metadata.name}{"\n"}{end}' \
-            2>/dev/null | grep -v '^$' | wc -l | tr -d ' ')
-    fi
-    
-    echo "$node_count"
+    echo "${ready_count}|${pending_count}|${nodeclaims_pending}|${ondemand_count}|${spot_count}"
     return 0
 }
 
 # -----------------------------------------------------------------------------
-# get_performance_metrics - Get throughput and response time metrics
+# get_performance_metrics - Get throughput and latency from OTel Prometheus
 # Requirements: 5.1, 5.2, 5.3, 5.4
-# Returns: throughput|p50|p95|p99|avg pipe-separated values, or "N/A|N/A|N/A|N/A|N/A" on failure
+# Returns: throughput|p50|p95|p99|avg|request_count|tokens_per_sec pipe-separated values
+# Note: Uses OTel Prometheus endpoint for real vLLM metrics
+# Note: Shows N/A for latency when no active requests (queue=0, running=0)
 # -----------------------------------------------------------------------------
 get_performance_metrics() {
     local throughput="N/A"
@@ -913,109 +1190,154 @@ get_performance_metrics() {
     local p95="N/A"
     local p99="N/A"
     local avg="N/A"
+    local request_count=0
+    local tokens_per_sec="N/A"
     
-    # Get a READY vLLM pod to query metrics (not just Running)
-    local vllm_pod
-    vllm_pod=$(kubectl get pods -n "$VLLM_NAMESPACE" \
-        -l "$VLLM_LABEL" \
-        -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{" "}{.metadata.name}{"\n"}{end}' \
-        2>/dev/null | grep '^true ' | head -1 | awk '{print $2}')
+    # Get raw metrics from OTel Prometheus endpoint
+    local raw_metrics
+    raw_metrics=$(get_otel_metrics_raw 2>/dev/null)
     
-    if [[ -z "$vllm_pod" ]]; then
-        log_error "No running vLLM pods found for performance metrics"
-        echo "N/A|N/A|N/A|N/A|N/A|N/A"
-        return 1
+    if [[ -n "$raw_metrics" ]]; then
+        # Get request count for RPS calculation
+        local total_requests
+        total_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_request_success_total" "sum")
+        if [[ -n "$total_requests" ]] && [[ "$total_requests" =~ ^[0-9]+$ ]]; then
+            request_count=$total_requests
+        fi
+        
+        # Get running requests as a proxy for throughput
+        local running_requests
+        running_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_running" "sum")
+        if [[ -n "$running_requests" ]] && [[ "$running_requests" =~ ^[0-9]+$ ]]; then
+            throughput=$running_requests
+        fi
+        
+        # Calculate tokens/s from generation_tokens_total (rate over time)
+        local current_tokens
+        current_tokens=$(parse_metric_from_raw "$raw_metrics" "vllm_generation_tokens_total" "sum")
+        local current_time=$(date +%s)
+        
+        if [[ -n "$current_tokens" ]] && [[ "$current_tokens" =~ ^[0-9]+$ ]]; then
+            if [[ $LAST_TOKENS_TIME -gt 0 ]] && [[ $LAST_TOKENS_TOTAL -gt 0 ]]; then
+                local time_diff=$((current_time - LAST_TOKENS_TIME))
+                local token_diff=$((current_tokens - LAST_TOKENS_TOTAL))
+                if [[ $time_diff -gt 0 ]] && [[ $token_diff -ge 0 ]]; then
+                    tokens_per_sec=$((token_diff / time_diff))
+                fi
+            fi
+            # Update tracking variables (these are global)
+            LAST_TOKENS_TOTAL=$current_tokens
+            LAST_TOKENS_TIME=$current_time
+        fi
+        
+        # Get waiting requests to check if there's active load
+        local waiting_requests
+        waiting_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_waiting" "sum")
+        
+        # Only show latency if there are active requests (running > 0 or waiting > 0)
+        # This prevents showing stale histogram data when the system is idle
+        local has_active_load=false
+        if [[ -n "$running_requests" ]] && [[ "$running_requests" =~ ^[0-9]+$ ]] && [[ "$running_requests" -gt 0 ]]; then
+            has_active_load=true
+        fi
+        if [[ -n "$waiting_requests" ]] && [[ "$waiting_requests" =~ ^[0-9]+$ ]] && [[ "$waiting_requests" -gt 0 ]]; then
+            has_active_load=true
+        fi
+        
+        # Parse latency histogram buckets for percentiles (only if there's active load)
+        # vllm_e2e_request_latency_seconds_bucket{le="X"} gives cumulative counts
+        # Note: OTel may expose as vllm_e2e... or vllm:e2e... depending on transform
+        if [[ "$has_active_load" == "true" ]]; then
+            local latency_data=""
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^vllm[_:]e2e_request_latency_seconds_bucket ]]; then
+                    latency_data+="$line"$'\n'
+                fi
+            done <<< "$raw_metrics"
+        
+            if [[ -n "$latency_data" ]]; then
+                # Parse histogram buckets to estimate percentiles
+                # Format: vllm_e2e_request_latency_seconds_bucket{le="0.5",...} count
+                local -a buckets=()
+                local -a counts=()
+                local total_count=0
+            
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    # Extract le value and count
+                    if [[ "$line" =~ le=\"([0-9.]+)\" ]]; then
+                        local le="${BASH_REMATCH[1]}"
+                        local count=$(echo "$line" | awk '{print $NF}')
+                        if [[ "$count" =~ ^[0-9]+$ ]]; then
+                            buckets+=("$le")
+                            counts+=("$count")
+                            total_count=$count  # Last bucket is total
+                        fi
+                    fi
+                done <<< "$latency_data"
+            
+                # Calculate percentiles from histogram
+                if [[ $total_count -gt 0 ]] && [[ ${#buckets[@]} -gt 0 ]]; then
+                    local p50_target=$((total_count * 50 / 100))
+                    local p95_target=$((total_count * 95 / 100))
+                    local p99_target=$((total_count * 99 / 100))
+                
+                    for i in "${!buckets[@]}"; do
+                        local bucket_le="${buckets[$i]}"
+                        local bucket_count="${counts[$i]}"
+                    
+                        # Convert seconds to milliseconds
+                        local ms_value=$(echo "$bucket_le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
+                        [[ -z "$ms_value" ]] && ms_value=0
+                    
+                        if [[ "$p50" == "N/A" ]] && [[ $bucket_count -ge $p50_target ]]; then
+                            p50=$ms_value
+                        fi
+                        if [[ "$p95" == "N/A" ]] && [[ $bucket_count -ge $p95_target ]]; then
+                            p95=$ms_value
+                        fi
+                        if [[ "$p99" == "N/A" ]] && [[ $bucket_count -ge $p99_target ]]; then
+                            p99=$ms_value
+                        fi
+                    done
+                fi
+            fi
+            
+            # Calculate average latency from histogram sum and count
+            # vllm_e2e_request_latency_seconds_sum / vllm_e2e_request_latency_seconds_count
+            local latency_sum=""
+            local latency_count=""
+            
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^vllm[_:]e2e_request_latency_seconds_sum ]]; then
+                    latency_sum=$(echo "$line" | awk '{print $(NF-1)}')
+                    # If no timestamp, use last field
+                    if ! [[ "$latency_sum" =~ ^[0-9.]+$ ]]; then
+                        latency_sum=$(echo "$line" | awk '{print $NF}')
+                    fi
+                fi
+                if [[ "$line" =~ ^vllm[_:]e2e_request_latency_seconds_count ]]; then
+                    latency_count=$(echo "$line" | awk '{print $(NF-1)}')
+                    # If no timestamp, use last field
+                    if ! [[ "$latency_count" =~ ^[0-9.]+$ ]]; then
+                        latency_count=$(echo "$line" | awk '{print $NF}')
+                    fi
+                fi
+            done <<< "$raw_metrics"
+            
+            if [[ -n "$latency_sum" ]] && [[ -n "$latency_count" ]] && [[ "$latency_count" =~ ^[0-9]+$ ]] && [[ $latency_count -gt 0 ]]; then
+                # Calculate average in milliseconds
+                local avg_seconds
+                avg_seconds=$(echo "scale=3; $latency_sum / $latency_count" | bc 2>/dev/null)
+                if [[ -n "$avg_seconds" ]]; then
+                    avg=$(echo "$avg_seconds * 1000" | bc 2>/dev/null | cut -d'.' -f1)
+                    [[ -z "$avg" ]] && avg="N/A"
+                fi
+            fi
+        fi  # end has_active_load check
     fi
     
-    # Query the vLLM metrics endpoint (port 8000, not 8080)
-    local metrics_output
-    metrics_output=$(kubectl exec -n "$VLLM_NAMESPACE" "$vllm_pod" -- \
-        curl -s http://localhost:8000/metrics 2>/dev/null)
-    
-    if [[ $? -ne 0 ]] || [[ -z "$metrics_output" ]]; then
-        log_error "Failed to query vLLM metrics endpoint"
-        echo "N/A|N/A|N/A|N/A|N/A|N/A"
-        return 1
-    fi
-    
-    # Get total request count from e2e_request_latency_seconds_count (for RPS calculation)
-    local request_count
-    request_count=$(echo "$metrics_output" | \
-        grep 'vllm:e2e_request_latency_seconds_count{' | \
-        head -1 | \
-        sed 's/.*} //' | \
-        cut -d'.' -f1)
-    
-    if [[ -z "$request_count" ]] || ! [[ "$request_count" =~ ^[0-9]+$ ]]; then
-        request_count="0"
-    fi
-    
-    # Parse response time from vllm:e2e_request_latency_seconds histogram
-    # Get average latency (sum / count)
-    local latency_sum
-    local latency_count
-    latency_sum=$(echo "$metrics_output" | \
-        grep 'vllm:e2e_request_latency_seconds_sum{' | \
-        head -1 | \
-        sed 's/.*} //')
-    
-    latency_count=$(echo "$metrics_output" | \
-        grep 'vllm:e2e_request_latency_seconds_count{' | \
-        head -1 | \
-        sed 's/.*} //')
-    
-    if [[ -n "$latency_sum" ]] && [[ -n "$latency_count" ]] && \
-       [[ "$latency_count" != "0" ]] && [[ "$latency_count" != "0.0" ]]; then
-        # Calculate average in milliseconds
-        avg=$(echo "$latency_sum $latency_count" | awk '{
-            if ($2 > 0) {
-                printf "%.0f", ($1 / $2) * 1000
-            } else {
-                print "N/A"
-            }
-        }')
-    fi
-    
-    # Try to parse time-to-first-token metrics
-    local ttft
-    ttft=$(echo "$metrics_output" | \
-        grep 'vllm:time_to_first_token_seconds_sum{' | \
-        head -1 | \
-        sed 's/.*} //')
-    
-    local ttft_count
-    ttft_count=$(echo "$metrics_output" | \
-        grep 'vllm:time_to_first_token_seconds_count{' | \
-        head -1 | \
-        sed 's/.*} //')
-    
-    if [[ -n "$ttft" ]] && [[ -n "$ttft_count" ]] && \
-       [[ "$ttft_count" != "0" ]] && [[ "$ttft_count" != "0.0" ]]; then
-        # Use TTFT as p50 estimate (time to first token is typically faster than full response)
-        p50=$(echo "$ttft $ttft_count" | awk '{
-            if ($2 > 0) {
-                printf "%.0f", ($1 / $2) * 1000
-            } else {
-                print "N/A"
-            }
-        }')
-    fi
-    
-    # If we have average but not percentiles, estimate them
-    if [[ "$avg" != "N/A" ]] && [[ "$p50" == "N/A" ]]; then
-        # Rough estimates: p50 ≈ avg * 0.8, p95 ≈ avg * 1.5, p99 ≈ avg * 2.0
-        p50=$(echo "$avg" | awk '{printf "%.0f", $1 * 0.8}')
-        p95=$(echo "$avg" | awk '{printf "%.0f", $1 * 1.5}')
-        p99=$(echo "$avg" | awk '{printf "%.0f", $1 * 2.0}')
-    elif [[ "$p50" != "N/A" ]] && [[ "$avg" != "N/A" ]]; then
-        # If we have p50 and avg, estimate p95 and p99
-        p95=$(echo "$avg" | awk '{printf "%.0f", $1 * 1.5}')
-        p99=$(echo "$avg" | awk '{printf "%.0f", $1 * 2.0}')
-    fi
-    
-    # Return: throughput(placeholder)|p50|p95|p99|avg|request_count
-    # RPS calculation happens in collect_all_metrics where we can track state
-    echo "0|${p50}|${p95}|${p99}|${avg}|${request_count}"
+    echo "${throughput}|${p50}|${p95}|${p99}|${avg}|${request_count}|${tokens_per_sec}"
     return 0
 }
 
@@ -1108,27 +1430,13 @@ render_header() {
 
 # -----------------------------------------------------------------------------
 # render_load_section - Display ASCII load graph with current RPS
-# Requirements: 1.1 (ASCII load graph), 1.4 (current RPS), 1.5 (load intensity)
+# Requirements: 1.1 (ASCII load graph), 1.4 (current RPS)
 # Output: Renders load visualization section to stdout
 # -----------------------------------------------------------------------------
 render_load_section() {
     local current_rps="${METRIC_CURRENT_RPS:-0}"
     local load_color
     load_color=$(determine_status_color "load" "$current_rps")
-    
-    # Determine load intensity label
-    local intensity_label="LOW"
-    if [[ "$current_rps" =~ ^[0-9]+$ ]]; then
-        if [[ $current_rps -ge $THRESHOLD_LOAD_HIGH ]]; then
-            intensity_label="HIGH"
-        elif [[ $current_rps -ge $THRESHOLD_LOAD_MEDIUM ]]; then
-            intensity_label="MEDIUM"
-        elif [[ $current_rps -ge $THRESHOLD_LOAD_LOW ]]; then
-            intensity_label="LOW"
-        else
-            intensity_label="IDLE"
-        fi
-    fi
     
     # Section header (78 inner + 2 borders = 80)
     printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} Load Graph ${NC}${BOLD_CYAN}"
@@ -1139,17 +1447,16 @@ render_load_section() {
     local graph_output
     graph_output=$(build_ascii_graph)
     
-    # Display graph with left border (50 graph chars + padding to 78)
+    # Display graph with left border (77 graph chars = 73 width + 4 Y-axis, padding 1 to reach 78)
     while IFS= read -r line; do
         printf "${BOLD_CYAN}${BOX_L_V}${NC}${COLOR_INFO}%s${NC}" "$line"
-        printf "%*s" "28" ""
+        printf " "
         printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     done <<< "$graph_output"
     
-    # RPS and intensity line (fit in 78 chars)
+    # RPS line (fit in 78 chars)
     printf "${BOLD_CYAN}${BOX_L_V}${NC} RPS: ${load_color}${BOLD}%-6s${NC}" "$current_rps"
-    printf " ${COLOR_MUTED}|${NC} Intensity: ${load_color}${BOLD}%-6s${NC}" "$intensity_label"
-    printf "%*s" "42" ""
+    printf "%*s" "66" ""
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
     # Section footer
@@ -1213,11 +1520,11 @@ render_queue_section() {
     printf "${BOLD_CYAN}${BOX_L_V}${NC} Depth: ${queue_color}${BOLD}%-4s${NC}${stale_marker}" "$queue_depth"
     printf " ${COLOR_MUTED}|${NC} Target: ${COLOR_INFO}%-2s${NC}" "$THRESHOLD_QUEUE_TARGET"
     printf " ${COLOR_MUTED}|${NC} Zone: ${zone_color}%s%-10s${NC}" "$zone_icon" "$zone_label"
-    printf "%*s" "$((29 - stale_padding))" ""
+    printf "%*s" "$((33 - stale_padding))" ""
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
-    # Visual queue bar (50 chars + borders)
-    local bar_width=50
+    # Visual queue bar (74 chars + borders + 1 space margin)
+    local bar_width=74
     local filled=0
     if [[ "$queue_depth" =~ ^[0-9]+$ ]] && [[ $queue_depth -gt 0 ]]; then
         filled=$(( (queue_depth * bar_width) / THRESHOLD_QUEUE_CRITICAL ))
@@ -1228,7 +1535,7 @@ render_queue_section() {
     for ((i=0; i<filled; i++)); do printf "${queue_color}${BLOCK_FULL}${NC}"; done
     for ((i=filled; i<bar_width; i++)); do printf "${COLOR_MUTED}${BLOCK_LIGHT}${NC}"; done
     printf "]"
-    printf "%*s" "24" ""
+    printf " "
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
     # Section footer
@@ -1241,11 +1548,23 @@ render_queue_section() {
 # render_pods_section - Display vLLM pod scaling status
 # Requirements: 3.1-3.6 (pod counts, scaling indicators, visual representation)
 # Output: Renders pod status section to stdout
+# Colors: Green=Ready (1/1), Yellow=NotReady (running but not 1/1), Yellow empty=Pending
 # -----------------------------------------------------------------------------
 render_pods_section() {
     local running="${METRIC_PODS_RUNNING:-0}"
     local desired="${METRIC_PODS_DESIRED:-0}"
     local ready="${METRIC_PODS_READY:-0}"
+    local pending="${METRIC_PODS_PENDING:-0}"
+    local not_ready="${METRIC_PODS_NOT_READY:-0}"
+    local startup_min="${METRIC_POD_STARTUP_MIN:-N/A}"
+    local startup_max="${METRIC_POD_STARTUP_MAX:-N/A}"
+    
+    # Ensure numeric values
+    [[ ! "$running" =~ ^[0-9]+$ ]] && running=0
+    [[ ! "$desired" =~ ^[0-9]+$ ]] && desired=0
+    [[ ! "$ready" =~ ^[0-9]+$ ]] && ready=0
+    [[ ! "$pending" =~ ^[0-9]+$ ]] && pending=0
+    [[ ! "$not_ready" =~ ^[0-9]+$ ]] && not_ready=0
     
     # Determine scaling direction
     local scaling_status
@@ -1255,23 +1574,23 @@ render_pods_section() {
     local direction_color="$COLOR_GOOD"
     local direction_label="Stable"
     
-    case "$scaling_status" in
-        "scaling_up")
-            direction_icon="$INDICATOR_UP"
-            direction_color="$COLOR_WARNING"
-            direction_label="Scaling Up"
-            ;;
-        "scaling_down")
-            direction_icon="$INDICATOR_DOWN"
-            direction_color="$COLOR_INFO"
-            direction_label="Scaling Down"
-            ;;
-        *)
-            direction_icon="$INDICATOR_STABLE"
-            direction_color="$COLOR_GOOD"
-            direction_label="Stable"
-            ;;
-    esac
+    # Check if pods are not ready (ready=0 but have running or pending pods)
+    # All labels are exactly 10 chars for consistent alignment
+    if [[ $ready -eq 0 ]] && [[ $((running + pending)) -gt 0 ]]; then
+        direction_icon="$INDICATOR_WARNING"
+        direction_color="$COLOR_ERROR"
+        direction_label="Not Ready "
+    elif [[ "$scaling_status" == "scaling_up" ]]; then
+        direction_icon="$INDICATOR_UP"
+        direction_color="$COLOR_WARNING"
+        direction_label="Scale Up  "
+    elif [[ "$scaling_status" == "scaling_down" ]]; then
+        direction_icon="$INDICATOR_DOWN"
+        direction_color="$COLOR_INFO"
+        direction_label="Scale Down"
+    else
+        direction_label="Stable    "
+    fi
     
     # Add stale indicator if needed
     local stale_marker=""
@@ -1284,43 +1603,77 @@ render_pods_section() {
     for ((i=0; i<66; i++)); do printf "${BOX_L_H}"; done
     printf "${BOX_L_TR}${NC}\n"
     
-    # Pod counts line (fit in 78 chars)
-    # Calculate padding based on stale marker presence (stale marker is 2 chars: space + ⚠)
+    # Pod counts line - calculate exact widths
+    # "│ Ready: XX | Desired: XX | X LabelLabelL                                    │"
+    # Without pending: │(1) + space(1) + Ready: (7) + XX(2) + space|space(3) + Desired: (9) + XX(2) + space|space(3) + icon(1) + space(1) + label(10) + padding + │(1) = 80
+    # = 1+1+7+2+3+9+2+3+1+1+10 = 40, padding = 78-40+1 = 39
+    # With pending: add " | Pending: XX" = 14 more, padding = 39-14 = 25
     local stale_padding=0
     [[ "$STALE_PODS" == "true" ]] && stale_padding=2
     
-    printf "${BOLD_CYAN}${BOX_L_V}${NC} Running: ${COLOR_GOOD}${BOLD}%-2s${NC}${stale_marker}" "$running"
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} Ready: ${COLOR_GOOD}${BOLD}%-2s${NC}${stale_marker}" "$ready"
     printf " ${COLOR_MUTED}|${NC} Desired: ${COLOR_INFO}%-2s${NC}" "$desired"
-    printf " ${COLOR_MUTED}|${NC} Ready: ${COLOR_GOOD}%-2s${NC}" "$ready"
-    printf " ${COLOR_MUTED}|${NC} ${direction_color}%s%-12s${NC}" "$direction_icon" "$direction_label"
-    printf "%*s" "$((22 - stale_padding))" ""
+    if [[ $pending -gt 0 ]]; then
+        printf " ${COLOR_MUTED}|${NC} Pending: ${COLOR_WARNING}%-2s${NC}" "$pending"
+        printf " ${COLOR_MUTED}|${NC} ${direction_color}%s %s${NC}" "$direction_icon" "$direction_label"
+        printf "%*s" "$((25 - stale_padding))" ""
+    else
+        printf " ${COLOR_MUTED}|${NC} ${direction_color}%s %s${NC}" "$direction_icon" "$direction_label"
+        printf "%*s" "$((39 - stale_padding))" ""
+    fi
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
-    # Visual pod representation
-    local max_pods=10
-    local display_running=$running
-    local display_desired=$desired
+    # Visual pod representation with startup time on same line
+    local max_pods=15
+    local display_ready=$ready
+    local display_not_ready=$not_ready
+    local display_pending=$pending
     
-    [[ ! "$display_running" =~ ^[0-9]+$ ]] && display_running=0
-    [[ ! "$display_desired" =~ ^[0-9]+$ ]] && display_desired=0
-    [[ $display_running -gt $max_pods ]] && display_running=$max_pods
-    [[ $display_desired -gt $max_pods ]] && display_desired=$max_pods
+    # Cap display counts
+    [[ $display_ready -gt $max_pods ]] && display_ready=$max_pods
+    local remaining=$((max_pods - display_ready))
+    [[ $display_not_ready -gt $remaining ]] && display_not_ready=$remaining
+    remaining=$((remaining - display_not_ready))
+    [[ $display_pending -gt $remaining ]] && display_pending=$remaining
     
-    # Calculate the max of running and desired for the empty slots
-    local max_shown=$display_running
-    [[ $display_desired -gt $max_shown ]] && max_shown=$display_desired
-    
+    # Pods line: "│ ● ● ○ ○ ... | Startup: Min: XXXs Max: XXXs                      │"
+    # │(1) + space(1) + 15pods*2(30) + space|space(3) + Startup:(8) + space(1) + Min:(4) + space(1) + XXXs(4) + space(1) + Max:(4) + space(1) + XXXs(4) + padding + │(1)
+    # = 1+1+30+3+8+1+4+1+4+1+4+1+4 = 63, padding = 78-63+1 = 16
     printf "${BOLD_CYAN}${BOX_L_V}${NC} "
-    for ((i=0; i<display_running; i++)); do
+    # Ready pods (green, filled)
+    for ((i=0; i<display_ready; i++)); do
         printf "${COLOR_GOOD}%s${NC} " "$POD_ICON"
     done
-    for ((i=display_running; i<display_desired; i++)); do
+    # Not ready pods (yellow, filled) - running but not 1/1
+    for ((i=0; i<display_not_ready; i++)); do
+        printf "${COLOR_WARNING}%s${NC} " "$POD_ICON"
+    done
+    # Pending pods (yellow, empty) - not yet scheduled/running
+    for ((i=0; i<display_pending; i++)); do
         printf "${COLOR_WARNING}%s${NC} " "$POD_EMPTY"
     done
-    for ((i=max_shown; i<max_pods; i++)); do
+    # Empty slots (gray)
+    local used=$((display_ready + display_not_ready + display_pending))
+    for ((i=used; i<max_pods; i++)); do
         printf "${COLOR_MUTED}%s${NC} " "$POD_EMPTY"
     done
-    printf "%*s" "$((78 - max_pods*2 - 1))" ""
+    
+    # Startup time with Min/Max labels
+    local startup_min="${METRIC_POD_STARTUP_MIN:-N/A}"
+    local startup_max="${METRIC_POD_STARTUP_MAX:-N/A}"
+    
+    printf "${COLOR_MUTED}|${NC} ${BOLD_WHITE}Startup:${NC} "
+    if [[ "$startup_min" != "N/A" ]] && [[ "$startup_max" != "N/A" ]]; then
+        # "Min: XXXs Max: XXXs" with fixed width values
+        printf "${COLOR_MUTED}Min:${NC} ${COLOR_GOOD}%-3ss${NC} ${COLOR_MUTED}Max:${NC} ${COLOR_WARNING}%-3ss${NC}" "$startup_min" "$startup_max"
+        # │(1) + space(1) + pods(30) + " | Startup: Min: XXXs Max: XXXs"(31) + padding + │(1) = 80
+        # padding = 80 - 64 = 16, but visually needs 17
+        printf "%*s" "17" ""
+    else
+        printf "${COLOR_MUTED}N/A${NC}"
+        # Same adjustment as values case - needs 33 padding
+        printf "%*s" "33" ""
+    fi
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
     # Section footer
@@ -1333,21 +1686,37 @@ render_pods_section() {
 # render_nodes_section - Display GPU node scaling status
 # Requirements: 4.1-4.3 (node count, visual representation)
 # Output: Renders node status section to stdout
+# Colors: Green=Ready, Yellow=Pending/NodeClaim, Red=NotReady
 # -----------------------------------------------------------------------------
 render_nodes_section() {
-    local node_count="${METRIC_NODES_COUNT:-0}"
+    local ready_count="${METRIC_NODES_READY:-0}"
+    local pending_count="${METRIC_NODES_PENDING:-0}"
+    local nodeclaims="${METRIC_NODECLAIMS_PENDING:-0}"
+    local total_count="${METRIC_NODES_COUNT:-0}"
+    local ondemand_count="${METRIC_NODES_ONDEMAND:-0}"
+    local spot_count="${METRIC_NODES_SPOT:-0}"
     
-    # Determine if nodes are scaling
-    local node_color="$COLOR_GOOD"
-    local scaling_indicator=""
+    # Ensure numeric values
+    [[ ! "$ready_count" =~ ^[0-9]+$ ]] && ready_count=0
+    [[ ! "$pending_count" =~ ^[0-9]+$ ]] && pending_count=0
+    [[ ! "$nodeclaims" =~ ^[0-9]+$ ]] && nodeclaims=0
+    [[ ! "$total_count" =~ ^[0-9]+$ ]] && total_count=0
+    [[ ! "$ondemand_count" =~ ^[0-9]+$ ]] && ondemand_count=0
+    [[ ! "$spot_count" =~ ^[0-9]+$ ]] && spot_count=0
     
-    if [[ "$node_count" =~ ^[0-9]+$ ]]; then
-        if [[ $node_count -eq 0 ]]; then
-            node_color="$COLOR_WARNING"
-            scaling_indicator="(waiting for Karpenter)"
-        fi
-    else
-        node_color="$COLOR_INFO"
+    # Determine status text and color
+    local status_text=""
+    local status_color="$COLOR_GOOD"
+    
+    if [[ $total_count -eq 0 ]] && [[ $nodeclaims -eq 0 ]]; then
+        status_color="$COLOR_WARNING"
+        status_text="(waiting for Karpenter)"
+    elif [[ $nodeclaims -gt 0 ]]; then
+        status_color="$COLOR_WARNING"
+        status_text="(+${nodeclaims} provisioning)"
+    elif [[ $pending_count -gt 0 ]]; then
+        status_color="$COLOR_WARNING"
+        status_text="(${pending_count} not ready)"
     fi
     
     # Add stale indicator if needed
@@ -1365,31 +1734,70 @@ render_nodes_section() {
     local stale_padding=0
     [[ "$STALE_NODES" == "true" ]] && stale_padding=2
     
-    printf "${BOLD_CYAN}${BOX_L_V}${NC} Count: ${node_color}${BOLD}%-2s${NC}${stale_marker}" "$node_count"
-    if [[ -n "$scaling_indicator" ]]; then
-        printf " ${COLOR_WARNING}%s${NC}" "$scaling_indicator"
-        # "Count: X  (waiting for Karpenter)" = 8 + 2 + 1 + 23 = 34 chars, need 78-34=44 padding
-        printf "%*s" "$((44 - stale_padding))" ""
+    # Show ready/total count
+    local count_display="${ready_count}/${total_count}"
+    if [[ $nodeclaims -gt 0 ]]; then
+        count_display="${ready_count}/$((total_count + nodeclaims))"
+    fi
+    
+    # Build capacity type display (On-Demand:X Spot:Y)
+    local capacity_display=""
+    if [[ $ready_count -gt 0 ]]; then
+        capacity_display="On-Demand:${ondemand_count} Spot:${spot_count}"
+    fi
+    
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} Ready: ${status_color}${BOLD}%-5s${NC}${stale_marker}" "$count_display"
+    if [[ -n "$capacity_display" ]]; then
+        printf " ${COLOR_MUTED}|${NC} ${COLOR_INFO}%s${NC}" "$capacity_display"
+        local cap_len=${#capacity_display}
+        if [[ -n "$status_text" ]]; then
+            printf " ${COLOR_WARNING}%s${NC}" "$status_text"
+            local text_len=${#status_text}
+            printf "%*s" "$((61 - cap_len - text_len - stale_padding))" ""
+        else
+            printf "%*s" "$((62 - cap_len - stale_padding))" ""
+        fi
+    elif [[ -n "$status_text" ]]; then
+        printf " ${COLOR_WARNING}%s${NC}" "$status_text"
+        local text_len=${#status_text}
+        printf "%*s" "$((64 - text_len - stale_padding))" ""
     else
-        printf "%*s" "$((68 - stale_padding))" ""
+        printf "%*s" "$((65 - stale_padding))" ""
     fi
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
-    # Visual node representation
-    local max_nodes=8
-    local display_count=$node_count
+    # Visual node representation with colors
+    local max_display=15
+    local display_ready=$ready_count
+    local display_pending=$pending_count
+    local display_claims=$nodeclaims
     
-    [[ ! "$display_count" =~ ^[0-9]+$ ]] && display_count=0
-    [[ $display_count -gt $max_nodes ]] && display_count=$max_nodes
+    # Cap display counts
+    [[ $display_ready -gt $max_display ]] && display_ready=$max_display
+    local remaining=$((max_display - display_ready))
+    [[ $display_pending -gt $remaining ]] && display_pending=$remaining
+    remaining=$((remaining - display_pending))
+    [[ $display_claims -gt $remaining ]] && display_claims=$remaining
     
     printf "${BOLD_CYAN}${BOX_L_V}${NC} "
-    for ((i=0; i<display_count; i++)); do
+    # Ready nodes (green)
+    for ((i=0; i<display_ready; i++)); do
         printf "${COLOR_GOOD}%s${NC} " "$NODE_ICON"
     done
-    for ((i=display_count; i<max_nodes; i++)); do
+    # Pending/NotReady nodes (yellow)
+    for ((i=0; i<display_pending; i++)); do
+        printf "${COLOR_WARNING}%s${NC} " "$NODE_ICON"
+    done
+    # NodeClaims being provisioned (yellow, empty icon)
+    for ((i=0; i<display_claims; i++)); do
+        printf "${COLOR_WARNING}%s${NC} " "$NODE_EMPTY"
+    done
+    # Empty slots (gray)
+    local used=$((display_ready + display_pending + display_claims))
+    for ((i=used; i<max_display; i++)); do
         printf "${COLOR_MUTED}%s${NC} " "$NODE_EMPTY"
     done
-    printf "%*s" "$((78 - max_nodes*2 - 1))" ""
+    printf "%*s" "$((78 - max_display*2 - 1))" ""
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
     # Section footer
@@ -1405,6 +1813,7 @@ render_nodes_section() {
 # -----------------------------------------------------------------------------
 render_performance_section() {
     local throughput="${METRIC_THROUGHPUT:-N/A}"
+    local tokens_per_sec="${METRIC_TOKENS_PER_SEC:-N/A}"
     local p50="${METRIC_RESPONSE_P50:-N/A}"
     local p95="${METRIC_RESPONSE_P95:-N/A}"
     local p99="${METRIC_RESPONSE_P99:-N/A}"
@@ -1429,34 +1838,54 @@ render_performance_section() {
         stale_marker=" ${COLOR_WARNING}${INDICATOR_WARNING}${NC}"
     fi
     
-    # Format values with units (keep short)
+    # Format values with units (keep short, convert large ms to seconds)
     local throughput_display="$throughput"
     [[ "$throughput" != "N/A" ]] && throughput_display="${throughput}"
     
-    local p50_display="$p50"
-    [[ "$p50" != "N/A" ]] && p50_display="${p50}ms"
+    local tokens_display="$tokens_per_sec"
+    [[ "$tokens_per_sec" != "N/A" ]] && tokens_display="${tokens_per_sec}"
     
-    local p95_display="$p95"
-    [[ "$p95" != "N/A" ]] && p95_display="${p95}ms"
+    # Helper to format latency (convert to seconds if >= 1000ms to keep short)
+    format_latency() {
+        local val="$1"
+        if [[ "$val" == "N/A" ]]; then
+            echo "N/A"
+        elif [[ "$val" -ge 10000 ]]; then
+            echo "$((val / 1000))s"
+        elif [[ "$val" -ge 1000 ]]; then
+            # Show as X.Xs for values 1000-9999
+            local secs=$((val / 1000))
+            local tenths=$(( (val % 1000) / 100 ))
+            echo "${secs}.${tenths}s"
+        else
+            echo "${val}ms"
+        fi
+    }
     
-    local p99_display="$p99"
-    [[ "$p99" != "N/A" ]] && p99_display="${p99}ms"
+    local p50_display=$(format_latency "$p50")
+    local p95_display=$(format_latency "$p95")
+    local p99_display=$(format_latency "$p99")
+    local avg_display=$(format_latency "$avg")
+    
+    local avg_color
+    avg_color=$(determine_status_color "response" "$avg")
     
     # Section header (78 inner + 2 borders = 80)
     printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} Performance ${NC}${BOLD_CYAN}"
     for ((i=0; i<64; i++)); do printf "${BOX_L_H}"; done
     printf "${BOX_L_TR}${NC}\n"
     
-    # Throughput line (fit in 78 chars)
+    # RPS and Tokens/s line (fit in 78 chars)
     # Calculate padding based on stale marker presence (stale marker is 2 chars: space + ⚠)
     local stale_padding=0
     [[ "$STALE_PERFORMANCE" == "true" ]] && stale_padding=2
     
-    printf "${BOLD_CYAN}${BOX_L_V}${NC} Throughput: ${throughput_color}${BOLD}%-6s${NC}${stale_marker}" "$throughput_display"
-    printf " ${COLOR_MUTED}|${NC} p50: ${p50_color}%-8s${NC}" "$p50_display"
-    printf " ${COLOR_MUTED}|${NC} p95: ${p95_color}%-8s${NC}" "$p95_display"
-    printf " ${COLOR_MUTED}|${NC} p99: ${p99_color}%-8s${NC}" "$p99_display"
-    printf "%*s" "$((4 - stale_padding))" ""
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} RPS: ${throughput_color}${BOLD}%-3s${NC}${stale_marker}" "$throughput_display"
+    printf " ${COLOR_MUTED}|${NC} Tok/s: ${COLOR_INFO}%-4s${NC}" "$tokens_display"
+    printf " ${COLOR_MUTED}|${NC} Avg: ${avg_color}%-5s${NC}" "$avg_display"
+    printf " ${COLOR_MUTED}|${NC} p50: ${p50_color}%-5s${NC}" "$p50_display"
+    printf " ${COLOR_MUTED}|${NC} p95: ${p95_color}%-5s${NC}" "$p95_display"
+    printf " ${COLOR_MUTED}|${NC} p99: ${p99_color}%-5s${NC}%*s" "$p99_display" "$((3 - stale_padding))" ""
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
     # Section footer
@@ -1541,7 +1970,7 @@ render_insights_section() {
             insight="${insight:0:70}..."
         fi
         
-        printf "${BOLD_CYAN}${BOX_L_V}${NC} ${color}${INDICATOR_CHECK}${NC} %-74s${BOLD_CYAN}${BOX_L_V}${NC}\n" "$insight"
+        printf "${BOLD_CYAN}${BOX_L_V}${NC} ${color}${INDICATOR_CHECK}${NC} %-75s${BOLD_CYAN}${BOX_L_V}${NC}\n" "$insight"
         displayed=$((displayed + 1))
     done
     
@@ -1587,28 +2016,92 @@ render_footer() {
 #   - Sets STALE_* flags when collection fails
 #   - Adds current RPS to load history
 # Returns: Always returns 0 (success) - failures are handled gracefully
+# Note: Uses parallel collection to minimize refresh time (unless DISABLE_PARALLEL=true for testing)
 # -----------------------------------------------------------------------------
 collect_all_metrics() {
     local pod_info
     local queue_depth
     local node_info
     local perf_metrics
-    local pod_exit_code
-    local queue_exit_code
-    local node_exit_code
-    local perf_exit_code
     
-    # Collect vLLM pod status
-    # Use || true to prevent errexit from stopping execution on failure
-    pod_info=$(get_vllm_pods 2>/dev/null) || true
-    pod_exit_code=$?
-    # Check if the result indicates failure (N/A values or empty)
-    if [[ -n "$pod_info" ]] && [[ "$pod_info" != "N/A|N/A|N/A" ]]; then
+    # Check if parallel collection is disabled (for testing)
+    if [[ "${DISABLE_PARALLEL:-false}" == "true" ]]; then
+        # Sequential collection (for testing with mocked functions)
+        pod_info=$(get_vllm_pods 2>/dev/null) || pod_info="N/A|N/A|N/A|N/A|N/A"
+        queue_depth=$(get_queue_depth 2>/dev/null) || queue_depth="N/A"
+        node_info=$(get_node_info 2>/dev/null) || node_info="0|0|0"
+        perf_metrics=$(get_performance_metrics 2>/dev/null) || perf_metrics="N/A|N/A|N/A|N/A|N/A|0"
+    else
+        # Create temp files for parallel collection results
+        local tmp_pods=$(mktemp)
+        local tmp_queue=$(mktemp)
+        local tmp_nodes=$(mktemp)
+        local tmp_perf=$(mktemp)
+        
+        # Collect all metrics in parallel using background processes
+        # This reduces total collection time from ~8-10s to ~2-3s
+        (get_vllm_pods 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A") > "$tmp_pods" &
+        local pid_pods=$!
+        
+        (get_queue_depth 2>/dev/null || echo "N/A") > "$tmp_queue" &
+        local pid_queue=$!
+        
+        (get_node_info 2>/dev/null || echo "0|0|0") > "$tmp_nodes" &
+        local pid_nodes=$!
+        
+        (get_performance_metrics 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|0") > "$tmp_perf" &
+        local pid_perf=$!
+        
+        # Wait for all background processes to complete
+        wait $pid_pods $pid_queue $pid_nodes $pid_perf 2>/dev/null
+        
+        # Read results from temp files
+        pod_info=$(cat "$tmp_pods")
+        queue_depth=$(cat "$tmp_queue")
+        node_info=$(cat "$tmp_nodes")
+        perf_metrics=$(cat "$tmp_perf")
+        
+        # Clean up temp files
+        rm -f "$tmp_pods" "$tmp_queue" "$tmp_nodes" "$tmp_perf"
+    fi
+    
+    # Process pod info (format: running|desired|ready|pending|not_ready|startup_min|startup_max)
+    if [[ -n "$pod_info" ]] && [[ "$pod_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\| ]]; then
         METRIC_PODS_RUNNING=$(echo "$pod_info" | cut -d'|' -f1)
         METRIC_PODS_DESIRED=$(echo "$pod_info" | cut -d'|' -f2)
         METRIC_PODS_READY=$(echo "$pod_info" | cut -d'|' -f3)
+        METRIC_PODS_PENDING=$(echo "$pod_info" | cut -d'|' -f4)
+        METRIC_PODS_NOT_READY=$(echo "$pod_info" | cut -d'|' -f5)
+        METRIC_POD_STARTUP_MIN=$(echo "$pod_info" | cut -d'|' -f6)
+        METRIC_POD_STARTUP_MAX=$(echo "$pod_info" | cut -d'|' -f7)
         
         # Update last known good values
+        LAST_GOOD_PODS_RUNNING="$METRIC_PODS_RUNNING"
+        LAST_GOOD_PODS_DESIRED="$METRIC_PODS_DESIRED"
+        LAST_GOOD_PODS_READY="$METRIC_PODS_READY"
+        STALE_PODS=false
+    elif [[ -n "$pod_info" ]] && [[ "$pod_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+        # Fallback for old 5-field format
+        METRIC_PODS_RUNNING=$(echo "$pod_info" | cut -d'|' -f1)
+        METRIC_PODS_DESIRED=$(echo "$pod_info" | cut -d'|' -f2)
+        METRIC_PODS_READY=$(echo "$pod_info" | cut -d'|' -f3)
+        METRIC_PODS_PENDING=$(echo "$pod_info" | cut -d'|' -f4)
+        METRIC_PODS_NOT_READY=$(echo "$pod_info" | cut -d'|' -f5)
+        METRIC_POD_STARTUP_MIN="N/A"
+        METRIC_POD_STARTUP_MAX="N/A"
+        LAST_GOOD_PODS_RUNNING="$METRIC_PODS_RUNNING"
+        LAST_GOOD_PODS_DESIRED="$METRIC_PODS_DESIRED"
+        LAST_GOOD_PODS_READY="$METRIC_PODS_READY"
+        STALE_PODS=false
+    elif [[ -n "$pod_info" ]] && [[ "$pod_info" != "N/A|N/A|N/A" ]] && [[ "$pod_info" != "N/A|N/A|N/A|N/A|N/A" ]] && [[ "$pod_info" != "N/A|N/A|N/A|N/A|N/A|N/A|N/A" ]]; then
+        # Fallback for old 3-field format
+        METRIC_PODS_RUNNING=$(echo "$pod_info" | cut -d'|' -f1)
+        METRIC_PODS_DESIRED=$(echo "$pod_info" | cut -d'|' -f2)
+        METRIC_PODS_READY=$(echo "$pod_info" | cut -d'|' -f3)
+        METRIC_PODS_PENDING=0
+        METRIC_PODS_NOT_READY=0
+        METRIC_POD_STARTUP_MIN="N/A"
+        METRIC_POD_STARTUP_MAX="N/A"
         LAST_GOOD_PODS_RUNNING="$METRIC_PODS_RUNNING"
         LAST_GOOD_PODS_DESIRED="$METRIC_PODS_DESIRED"
         LAST_GOOD_PODS_READY="$METRIC_PODS_READY"
@@ -1622,9 +2115,7 @@ collect_all_metrics() {
         log_error "Failed to collect pod metrics, using last known values"
     fi
     
-    # Collect queue depth
-    queue_depth=$(get_queue_depth 2>/dev/null) || true
-    queue_exit_code=$?
+    # Process queue depth
     if [[ -n "$queue_depth" ]] && [[ "$queue_depth" != "N/A" ]]; then
         METRIC_QUEUE_DEPTH="$queue_depth"
         LAST_GOOD_QUEUE_DEPTH="$queue_depth"
@@ -1636,11 +2127,34 @@ collect_all_metrics() {
         log_error "Failed to collect queue depth, using last known value"
     fi
     
-    # Collect node info (returns just the count)
-    node_info=$(get_node_info 2>/dev/null) || true
-    node_exit_code=$?
-    if [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+$ ]]; then
+    # Process node info (format: ready|pending|nodeclaims|ondemand|spot)
+    if [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+        METRIC_NODES_READY=$(echo "$node_info" | cut -d'|' -f1)
+        METRIC_NODES_PENDING=$(echo "$node_info" | cut -d'|' -f2)
+        METRIC_NODECLAIMS_PENDING=$(echo "$node_info" | cut -d'|' -f3)
+        METRIC_NODES_ONDEMAND=$(echo "$node_info" | cut -d'|' -f4)
+        METRIC_NODES_SPOT=$(echo "$node_info" | cut -d'|' -f5)
+        METRIC_NODES_COUNT=$((METRIC_NODES_READY + METRIC_NODES_PENDING))
+        LAST_GOOD_NODES_COUNT="$METRIC_NODES_COUNT"
+        STALE_NODES=false
+    elif [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+        # Fallback for old format (ready|pending|nodeclaims)
+        METRIC_NODES_READY=$(echo "$node_info" | cut -d'|' -f1)
+        METRIC_NODES_PENDING=$(echo "$node_info" | cut -d'|' -f2)
+        METRIC_NODECLAIMS_PENDING=$(echo "$node_info" | cut -d'|' -f3)
+        METRIC_NODES_ONDEMAND=0
+        METRIC_NODES_SPOT=0
+        METRIC_NODES_COUNT=$((METRIC_NODES_READY + METRIC_NODES_PENDING))
+        LAST_GOOD_NODES_COUNT="$METRIC_NODES_COUNT"
+        STALE_NODES=false
+    elif [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+$ ]]; then
+        # Fallback for old format (just count)
         METRIC_NODES_COUNT="$node_info"
+        METRIC_NODES_READY="$node_info"
+        METRIC_NODES_PENDING=0
+        METRIC_NODECLAIMS_PENDING=0
+        METRIC_NODES_ONDEMAND=0
+        METRIC_NODES_SPOT=0
         LAST_GOOD_NODES_COUNT="$METRIC_NODES_COUNT"
         STALE_NODES=false
     else
@@ -1650,40 +2164,24 @@ collect_all_metrics() {
         log_error "Failed to collect node info, using last known value"
     fi
     
-    # Collect performance metrics
-    perf_metrics=$(get_performance_metrics 2>/dev/null) || true
-    perf_exit_code=$?
-    if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|N/A" ]]; then
-        # Parse: throughput(placeholder)|p50|p95|p99|avg|request_count
+    # Process performance metrics
+    if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|0" ]]; then
         METRIC_THROUGHPUT=$(echo "$perf_metrics" | cut -d'|' -f1)
         METRIC_RESPONSE_P50=$(echo "$perf_metrics" | cut -d'|' -f2)
         METRIC_RESPONSE_P95=$(echo "$perf_metrics" | cut -d'|' -f3)
         METRIC_RESPONSE_P99=$(echo "$perf_metrics" | cut -d'|' -f4)
         METRIC_RESPONSE_AVG=$(echo "$perf_metrics" | cut -d'|' -f5)
         local request_count=$(echo "$perf_metrics" | cut -d'|' -f6)
-        
-        # Calculate RPS from request count delta (must be done here, not in subshell)
-        local current_time=$(date +%s)
-        if [[ -n "$request_count" ]] && [[ "$request_count" =~ ^[0-9]+$ ]]; then
-            if [[ $LAST_REQUEST_TIME -gt 0 ]]; then
-                local time_diff=$((current_time - LAST_REQUEST_TIME))
-                local count_diff=$((request_count - LAST_REQUEST_COUNT))
-                
-                if [[ $time_diff -gt 0 ]] && [[ $count_diff -ge 0 ]]; then
-                    METRIC_THROUGHPUT=$((count_diff / time_diff))
-                fi
-            fi
-            # Update state for next calculation
-            LAST_REQUEST_COUNT=$request_count
-            LAST_REQUEST_TIME=$current_time
-        fi
+        METRIC_TOKENS_PER_SEC=$(echo "$perf_metrics" | cut -d'|' -f7)
         
         # Update last known good values
-        LAST_GOOD_THROUGHPUT="$METRIC_THROUGHPUT"
+        [[ "$METRIC_THROUGHPUT" != "N/A" ]] && LAST_GOOD_THROUGHPUT="$METRIC_THROUGHPUT"
+        [[ "$METRIC_TOKENS_PER_SEC" != "N/A" ]] && LAST_GOOD_TOKENS_PER_SEC="$METRIC_TOKENS_PER_SEC"
         STALE_PERFORMANCE=false
     else
         # Use last known good values and mark as stale
         METRIC_THROUGHPUT="${LAST_GOOD_THROUGHPUT:-N/A}"
+        METRIC_TOKENS_PER_SEC="${LAST_GOOD_TOKENS_PER_SEC:-N/A}"
         METRIC_RESPONSE_P50="N/A"
         METRIC_RESPONSE_P95="N/A"
         METRIC_RESPONSE_P99="N/A"
@@ -1692,18 +2190,12 @@ collect_all_metrics() {
         log_error "Failed to collect performance metrics, using last known values"
     fi
     
-    # Update current RPS (use throughput or queue depth as proxy)
-    if [[ "$METRIC_THROUGHPUT" != "N/A" ]] && [[ "$METRIC_THROUGHPUT" =~ ^[0-9]+$ ]]; then
+    # Update current RPS from throughput (no fallback - keep it consistent)
+    if [[ "$METRIC_THROUGHPUT" =~ ^[0-9]+$ ]]; then
         METRIC_CURRENT_RPS="$METRIC_THROUGHPUT"
-    elif [[ "$METRIC_QUEUE_DEPTH" != "N/A" ]] && [[ "$METRIC_QUEUE_DEPTH" =~ ^[0-9]+$ ]]; then
-        # Use queue depth as a proxy for load when throughput is unavailable
-        METRIC_CURRENT_RPS="$METRIC_QUEUE_DEPTH"
     else
         METRIC_CURRENT_RPS=0
     fi
-    
-    # Add current RPS to load history for graph
-    add_to_load_history "$METRIC_CURRENT_RPS"
     
     # Update scaling status
     METRIC_SCALING_STATUS=$(determine_scaling_status "pods" "$METRIC_PODS_RUNNING" "$METRIC_PODS_DESIRED")
@@ -1713,6 +2205,172 @@ collect_all_metrics() {
     
     # Always return success - failures are handled gracefully with stale indicators
     return 0
+}
+
+# -----------------------------------------------------------------------------
+# collect_all_metrics_async - Async version that writes results to a temp file
+# Parameters:
+#   $1 - Path to temp file where results will be written as shell variable assignments
+# Note: This runs in a subshell, so it writes variable assignments to a file
+#       that can be sourced by the parent process
+# -----------------------------------------------------------------------------
+collect_all_metrics_async() {
+    local output_file="$1"
+    local pod_info queue_depth node_info perf_metrics
+    
+    # Create temp files for parallel collection
+    local tmp_pods=$(mktemp)
+    local tmp_queue=$(mktemp)
+    local tmp_nodes=$(mktemp)
+    local tmp_perf=$(mktemp)
+    
+    # Collect all metrics in parallel
+    (get_vllm_pods 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A") > "$tmp_pods" &
+    local pid_pods=$!
+    
+    (get_queue_depth 2>/dev/null || echo "N/A") > "$tmp_queue" &
+    local pid_queue=$!
+    
+    (get_node_info 2>/dev/null || echo "0|0|0") > "$tmp_nodes" &
+    local pid_nodes=$!
+    
+    (get_performance_metrics 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|0") > "$tmp_perf" &
+    local pid_perf=$!
+    
+    # Wait for all to complete
+    wait $pid_pods $pid_queue $pid_nodes $pid_perf 2>/dev/null
+    
+    # Read results
+    pod_info=$(cat "$tmp_pods")
+    queue_depth=$(cat "$tmp_queue")
+    node_info=$(cat "$tmp_nodes")
+    perf_metrics=$(cat "$tmp_perf")
+    
+    # Clean up temp files
+    rm -f "$tmp_pods" "$tmp_queue" "$tmp_nodes" "$tmp_perf"
+    
+    # Write results as shell variable assignments to output file
+    {
+        # Process pod info (format: running|desired|ready|pending|not_ready|startup_min|startup_max)
+        if [[ -n "$pod_info" ]] && [[ "$pod_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\| ]]; then
+            echo "METRIC_PODS_RUNNING='$(echo "$pod_info" | cut -d'|' -f1)'"
+            echo "METRIC_PODS_DESIRED='$(echo "$pod_info" | cut -d'|' -f2)'"
+            echo "METRIC_PODS_READY='$(echo "$pod_info" | cut -d'|' -f3)'"
+            echo "METRIC_PODS_PENDING='$(echo "$pod_info" | cut -d'|' -f4)'"
+            echo "METRIC_PODS_NOT_READY='$(echo "$pod_info" | cut -d'|' -f5)'"
+            echo "METRIC_POD_STARTUP_MIN='$(echo "$pod_info" | cut -d'|' -f6)'"
+            echo "METRIC_POD_STARTUP_MAX='$(echo "$pod_info" | cut -d'|' -f7)'"
+            echo "LAST_GOOD_PODS_RUNNING='$(echo "$pod_info" | cut -d'|' -f1)'"
+            echo "LAST_GOOD_PODS_DESIRED='$(echo "$pod_info" | cut -d'|' -f2)'"
+            echo "LAST_GOOD_PODS_READY='$(echo "$pod_info" | cut -d'|' -f3)'"
+            echo "STALE_PODS=false"
+        elif [[ -n "$pod_info" ]] && [[ "$pod_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+            # Fallback for old 5-field format
+            echo "METRIC_PODS_RUNNING='$(echo "$pod_info" | cut -d'|' -f1)'"
+            echo "METRIC_PODS_DESIRED='$(echo "$pod_info" | cut -d'|' -f2)'"
+            echo "METRIC_PODS_READY='$(echo "$pod_info" | cut -d'|' -f3)'"
+            echo "METRIC_PODS_PENDING='$(echo "$pod_info" | cut -d'|' -f4)'"
+            echo "METRIC_PODS_NOT_READY='$(echo "$pod_info" | cut -d'|' -f5)'"
+            echo "METRIC_POD_STARTUP_MIN='N/A'"
+            echo "METRIC_POD_STARTUP_MAX='N/A'"
+            echo "LAST_GOOD_PODS_RUNNING='$(echo "$pod_info" | cut -d'|' -f1)'"
+            echo "LAST_GOOD_PODS_DESIRED='$(echo "$pod_info" | cut -d'|' -f2)'"
+            echo "LAST_GOOD_PODS_READY='$(echo "$pod_info" | cut -d'|' -f3)'"
+            echo "STALE_PODS=false"
+        elif [[ -n "$pod_info" ]] && [[ "$pod_info" != "N/A|N/A|N/A|N/A|N/A" ]] && [[ "$pod_info" != "N/A|N/A|N/A|N/A|N/A|N/A|N/A" ]]; then
+            # Fallback for old format
+            echo "METRIC_PODS_RUNNING='$(echo "$pod_info" | cut -d'|' -f1)'"
+            echo "METRIC_PODS_DESIRED='$(echo "$pod_info" | cut -d'|' -f2)'"
+            echo "METRIC_PODS_READY='$(echo "$pod_info" | cut -d'|' -f3)'"
+            echo "METRIC_PODS_PENDING='0'"
+            echo "METRIC_PODS_NOT_READY='0'"
+            echo "METRIC_POD_STARTUP_MIN='N/A'"
+            echo "METRIC_POD_STARTUP_MAX='N/A'"
+            echo "STALE_PODS=false"
+        else
+            echo "STALE_PODS=true"
+        fi
+        
+        # Process queue depth
+        if [[ -n "$queue_depth" ]] && [[ "$queue_depth" != "N/A" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
+            echo "METRIC_QUEUE_DEPTH='$queue_depth'"
+            echo "LAST_GOOD_QUEUE_DEPTH='$queue_depth'"
+            echo "STALE_QUEUE_DEPTH=false"
+        else
+            echo "STALE_QUEUE_DEPTH=true"
+        fi
+        
+        # Process node info (format: ready|pending|nodeclaims|ondemand|spot)
+        if [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+            local ready=$(echo "$node_info" | cut -d'|' -f1)
+            local pending=$(echo "$node_info" | cut -d'|' -f2)
+            local claims=$(echo "$node_info" | cut -d'|' -f3)
+            local ondemand=$(echo "$node_info" | cut -d'|' -f4)
+            local spot=$(echo "$node_info" | cut -d'|' -f5)
+            local total=$((ready + pending))
+            echo "METRIC_NODES_READY='$ready'"
+            echo "METRIC_NODES_PENDING='$pending'"
+            echo "METRIC_NODECLAIMS_PENDING='$claims'"
+            echo "METRIC_NODES_ONDEMAND='$ondemand'"
+            echo "METRIC_NODES_SPOT='$spot'"
+            echo "METRIC_NODES_COUNT='$total'"
+            echo "LAST_GOOD_NODES_COUNT='$total'"
+            echo "STALE_NODES=false"
+        elif [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+            # Fallback for old format (ready|pending|nodeclaims)
+            local ready=$(echo "$node_info" | cut -d'|' -f1)
+            local pending=$(echo "$node_info" | cut -d'|' -f2)
+            local claims=$(echo "$node_info" | cut -d'|' -f3)
+            local total=$((ready + pending))
+            echo "METRIC_NODES_READY='$ready'"
+            echo "METRIC_NODES_PENDING='$pending'"
+            echo "METRIC_NODECLAIMS_PENDING='$claims'"
+            echo "METRIC_NODES_ONDEMAND='0'"
+            echo "METRIC_NODES_SPOT='0'"
+            echo "METRIC_NODES_COUNT='$total'"
+            echo "LAST_GOOD_NODES_COUNT='$total'"
+            echo "STALE_NODES=false"
+        elif [[ -n "$node_info" ]] && [[ "$node_info" =~ ^[0-9]+$ ]]; then
+            # Fallback for old format
+            echo "METRIC_NODES_COUNT='$node_info'"
+            echo "METRIC_NODES_READY='$node_info'"
+            echo "METRIC_NODES_PENDING='0'"
+            echo "METRIC_NODECLAIMS_PENDING='0'"
+            echo "METRIC_NODES_ONDEMAND='0'"
+            echo "METRIC_NODES_SPOT='0'"
+            echo "LAST_GOOD_NODES_COUNT='$node_info'"
+            echo "STALE_NODES=false"
+        else
+            echo "STALE_NODES=true"
+        fi
+        
+        # Process performance metrics
+        if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
+            local throughput=$(echo "$perf_metrics" | cut -d'|' -f1)
+            local tokens_per_sec=$(echo "$perf_metrics" | cut -d'|' -f7)
+            echo "METRIC_THROUGHPUT='$throughput'"
+            echo "METRIC_TOKENS_PER_SEC='$tokens_per_sec'"
+            echo "METRIC_RESPONSE_P50='$(echo "$perf_metrics" | cut -d'|' -f2)'"
+            echo "METRIC_RESPONSE_P95='$(echo "$perf_metrics" | cut -d'|' -f3)'"
+            echo "METRIC_RESPONSE_P99='$(echo "$perf_metrics" | cut -d'|' -f4)'"
+            echo "METRIC_RESPONSE_AVG='$(echo "$perf_metrics" | cut -d'|' -f5)'"
+            [[ "$throughput" != "N/A" ]] && echo "LAST_GOOD_THROUGHPUT='$throughput'"
+            [[ "$tokens_per_sec" != "N/A" ]] && echo "LAST_GOOD_TOKENS_PER_SEC='$tokens_per_sec'"
+            echo "STALE_PERFORMANCE=false"
+            # Use throughput directly for graph RPS (no fallback to queue_depth)
+            if [[ "$throughput" =~ ^[0-9]+$ ]]; then
+                echo "METRIC_CURRENT_RPS='$throughput'"
+            else
+                echo "METRIC_CURRENT_RPS='0'"
+            fi
+        else
+            echo "STALE_PERFORMANCE=true"
+            echo "METRIC_CURRENT_RPS='0'"
+        fi
+        
+        # Update timestamp
+        echo "METRIC_LAST_UPDATE='$(date '+%H:%M:%S')'"
+    } > "$output_file"
 }
 
 # -----------------------------------------------------------------------------
@@ -1751,10 +2409,14 @@ render_dashboard() {
 # Requirements: 8.3 (graceful exit)
 # Side effects:
 #   - Restores cursor visibility
+#   - Stops port-forward process
 #   - Displays goodbye message
 #   - Logs shutdown event
 # -----------------------------------------------------------------------------
 cleanup() {
+    # Stop port-forward if running
+    stop_port_forward
+    
     # Restore cursor visibility
     printf "${CURSOR_SHOW}"
     
@@ -1806,22 +2468,56 @@ run_dashboard() {
     # Log startup
     log_info "Dashboard started"
     
-    # Main loop
+    # Async collection state
+    local collection_pid=""
+    local collection_tmp=""
+    
+    # Main loop - renders every REFRESH_INTERVAL seconds regardless of collection status
     while [[ "$RUNNING" == "true" ]]; do
-        # Collect all metrics from Kubernetes
-        collect_all_metrics
+        # Check if background collection has completed
+        if [[ -n "$collection_pid" ]]; then
+            if ! kill -0 "$collection_pid" 2>/dev/null; then
+                # Collection finished - read results and update metrics
+                if [[ -f "$collection_tmp" ]]; then
+                    source "$collection_tmp" 2>/dev/null
+                    rm -f "$collection_tmp"
+                fi
+                collection_pid=""
+                collection_tmp=""
+            fi
+        fi
         
-        # Render the dashboard
+        # Start new background collection if none is running
+        if [[ -z "$collection_pid" ]]; then
+            collection_tmp=$(mktemp)
+            (
+                # Run collection and write results to temp file
+                collect_all_metrics_async "$collection_tmp"
+            ) &
+            collection_pid=$!
+        fi
+        
+        # Always add current RPS to history for graph animation
+        # This ensures graph moves even when waiting for new data
+        add_to_load_history "$METRIC_CURRENT_RPS"
+        
+        # Render the dashboard with current (possibly stale) values
         render_dashboard
         
-        # Sleep for refresh interval
-        # Use a loop with shorter sleeps to be more responsive to signals
+        # Sleep for refresh interval (responsive to signals)
         local sleep_count=0
         while [[ $sleep_count -lt $REFRESH_INTERVAL ]] && [[ "$RUNNING" == "true" ]]; do
             sleep 1
             sleep_count=$((sleep_count + 1))
         done
     done
+    
+    # Cleanup background collection if still running
+    if [[ -n "$collection_pid" ]]; then
+        kill "$collection_pid" 2>/dev/null
+        wait "$collection_pid" 2>/dev/null
+        [[ -n "$collection_tmp" ]] && rm -f "$collection_tmp"
+    fi
     
     # Log shutdown
     log_info "Dashboard stopped"

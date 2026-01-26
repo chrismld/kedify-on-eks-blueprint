@@ -3,6 +3,7 @@
 # 1. Scrapes Prometheus metrics from vLLM pods on port 8000
 # 2. Renames vllm:num_requests_waiting -> vllm_num_requests_waiting (KEDA compatibility)
 # 3. Forwards metrics to kedify-otel-scaler for autoscaling decisions
+# 4. Exposes metrics via Prometheus endpoint for dashboard queries (port 8889)
 apiVersion: opentelemetry.io/v1beta1
 kind: OpenTelemetryCollector
 metadata:
@@ -16,6 +17,11 @@ spec:
   replicas: 1
   imagePullPolicy: IfNotPresent
   upgradeStrategy: none
+  ports:
+    - name: prometheus
+      port: 8889
+      targetPort: 8889
+      protocol: TCP
   resources:
     requests:
       cpu: 200m
@@ -58,8 +64,8 @@ spec:
         timeout: 2s
         override: false
 
-      # Transform: rename metric from colon format to underscore format
-      # vLLM exposes vllm:num_requests_waiting but KEDA queries vllm_num_requests_waiting
+      # Transform: rename metrics from colon format to underscore format
+      # vLLM exposes vllm:metric_name but Prometheus prefers vllm_metric_name
       transform:
         metric_statements:
           - context: datapoint
@@ -70,9 +76,16 @@ spec:
           - context: metric
             statements:
               - set(name, "vllm_num_requests_waiting") where name == "vllm:num_requests_waiting"
+              - set(name, "vllm_num_requests_running") where name == "vllm:num_requests_running"
+              - set(name, "vllm_e2e_request_latency_seconds") where name == "vllm:e2e_request_latency_seconds"
+              - set(name, "vllm_request_success_total") where name == "vllm:request_success_total"
+              - set(name, "vllm_prompt_tokens_total") where name == "vllm:prompt_tokens_total"
+              - set(name, "vllm_generation_tokens_total") where name == "vllm:generation_tokens_total"
+              - set(name, "vllm_time_to_first_token_seconds") where name == "vllm:time_to_first_token_seconds"
+              - set(name, "vllm_gpu_cache_usage_perc") where name == "vllm:gpu_cache_usage_perc"
 
-      # Filter to only include the metrics we need
-      filter/metrics:
+      # Filter to only include the metrics we need for KEDA scaling
+      filter/metrics_keda:
         metrics:
           include:
             match_type: strict
@@ -80,19 +93,61 @@ spec:
               - vllm:num_requests_waiting
               - vllm_num_requests_waiting
 
+      # Filter for dashboard metrics (includes more metrics)
+      filter/metrics_dashboard:
+        metrics:
+          include:
+            match_type: regexp
+            metric_names:
+              - vllm.*
+
     exporters:
+      # OTLP exporter for KEDA scaling (only queue depth)
       otlp/keda:
         endpoint: kedify-otel-scaler.keda.svc:4317
         tls:
           insecure: true
         compression: none
 
+      # Prometheus exporter for dashboard queries (all vLLM metrics)
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+        namespace: ""
+        send_timestamps: true
+        resource_to_telemetry_conversion:
+          enabled: true
+
     service:
       telemetry:
         logs:
           level: info  # Change to 'debug' for troubleshooting
       pipelines:
-        metrics:
+        # Pipeline for KEDA scaling (filtered to queue depth only)
+        metrics/keda:
           receivers: [prometheus]
-          processors: [resourcedetection/env, transform, filter/metrics]
+          processors: [resourcedetection/env, transform, filter/metrics_keda]
           exporters: [otlp/keda]
+        # Pipeline for dashboard (all vLLM metrics via Prometheus endpoint)
+        metrics/dashboard:
+          receivers: [prometheus]
+          processors: [resourcedetection/env, transform, filter/metrics_dashboard]
+          exporters: [prometheus]
+
+---
+# Service to expose the OTel Collector's Prometheus endpoint for dashboard queries
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-vllm-metrics
+  namespace: keda
+  labels:
+    app.kubernetes.io/name: scrape-vllm-collector
+spec:
+  type: ClusterIP
+  ports:
+    - name: prometheus
+      port: 8889
+      targetPort: 8889
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: scrape-vllm-collector

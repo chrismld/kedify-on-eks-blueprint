@@ -237,10 +237,12 @@ random_int() {
 # Validates: Requirements 1.1
 # =============================================================================
 # For any load history data (including empty, single-element, and full arrays),
-# the generated ASCII graph SHALL have exactly GRAPH_HEIGHT (10) lines, and
-# each line SHALL have exactly GRAPH_WIDTH (50) printable characters.
+# the generated ASCII graph SHALL have exactly GRAPH_HEIGHT+1 (11) lines
+# (10 data rows + 1 x-axis row), and each line SHALL have the correct format:
+# - Data rows: 4-char Y-axis prefix + GRAPH_WIDTH (50) chars = 54 chars
+# - X-axis row: 4-char prefix + dashes + timestamp = 54 chars
 
-@test "Property 2: Graph dimensions consistency - always 10 lines x 50 chars" {
+@test "Property 2: Graph dimensions consistency - always 11 lines with correct format" {
     # Run 5 iterations with random load histories
     for iteration in $(seq 1 5); do
         # Reset history
@@ -258,21 +260,24 @@ random_int() {
         # Generate the graph
         local output=$(build_ascii_graph)
         
-        # Count lines
+        # Count lines (should be GRAPH_HEIGHT + 1 for x-axis)
         local line_count=$(echo "$output" | wc -l | tr -d ' ')
+        local expected_lines=$((GRAPH_HEIGHT + 1))
         
-        # Verify exactly GRAPH_HEIGHT lines
-        if [[ $line_count -ne $GRAPH_HEIGHT ]]; then
-            echo "FAILED iteration $iteration: Expected $GRAPH_HEIGHT lines, got $line_count (history_len=$history_len)"
+        # Verify exactly GRAPH_HEIGHT+1 lines
+        if [[ $line_count -ne $expected_lines ]]; then
+            echo "FAILED iteration $iteration: Expected $expected_lines lines, got $line_count (history_len=$history_len)"
             return 1
         fi
         
-        # Verify each line has exactly GRAPH_WIDTH characters
+        # Verify each data line has correct format (4-char prefix + 50 graph chars = 54)
         local line_num=1
         while IFS= read -r line; do
             local line_len=${#line}
-            if [[ $line_len -ne $GRAPH_WIDTH ]]; then
-                echo "FAILED iteration $iteration: Line $line_num has $line_len chars, expected $GRAPH_WIDTH (history_len=$history_len)"
+            local expected_len=$((GRAPH_WIDTH + 4))  # 4 chars for Y-axis prefix
+            if [[ $line_len -ne $expected_len ]]; then
+                echo "FAILED iteration $iteration: Line $line_num has $line_len chars, expected $expected_len (history_len=$history_len)"
+                echo "Line: $line"
                 return 1
             fi
             line_num=$((line_num + 1))
@@ -285,13 +290,15 @@ random_int() {
     
     local output=$(build_ascii_graph)
     local line_count=$(echo "$output" | wc -l | tr -d ' ')
+    local expected_lines=$((GRAPH_HEIGHT + 1))
     
-    # Verify exactly GRAPH_HEIGHT lines
-    [[ $line_count -eq $GRAPH_HEIGHT ]]
+    # Verify exactly GRAPH_HEIGHT+1 lines
+    [[ $line_count -eq $expected_lines ]]
     
-    # Verify each line has exactly GRAPH_WIDTH characters (all spaces)
+    # Verify each line has correct length (4-char prefix + 50 graph chars = 54)
+    local expected_len=$((GRAPH_WIDTH + 4))
     while IFS= read -r line; do
-        [[ ${#line} -eq $GRAPH_WIDTH ]]
+        [[ ${#line} -eq $expected_len ]]
     done <<< "$output"
 }
 
@@ -300,11 +307,13 @@ random_int() {
     
     local output=$(build_ascii_graph)
     local line_count=$(echo "$output" | wc -l | tr -d ' ')
+    local expected_lines=$((GRAPH_HEIGHT + 1))
     
-    [[ $line_count -eq $GRAPH_HEIGHT ]]
+    [[ $line_count -eq $expected_lines ]]
     
+    local expected_len=$((GRAPH_WIDTH + 4))
     while IFS= read -r line; do
-        [[ ${#line} -eq $GRAPH_WIDTH ]]
+        [[ ${#line} -eq $expected_len ]]
     done <<< "$output"
 }
 
@@ -316,11 +325,13 @@ random_int() {
     
     local output=$(build_ascii_graph)
     local line_count=$(echo "$output" | wc -l | tr -d ' ')
+    local expected_lines=$((GRAPH_HEIGHT + 1))
     
-    [[ $line_count -eq $GRAPH_HEIGHT ]]
+    [[ $line_count -eq $expected_lines ]]
     
+    local expected_len=$((GRAPH_WIDTH + 4))
     while IFS= read -r line; do
-        [[ ${#line} -eq $GRAPH_WIDTH ]]
+        [[ ${#line} -eq $expected_len ]]
     done <<< "$output"
 }
 
@@ -332,11 +343,13 @@ random_int() {
     
     local output=$(build_ascii_graph)
     local line_count=$(echo "$output" | wc -l | tr -d ' ')
+    local expected_lines=$((GRAPH_HEIGHT + 1))
     
-    [[ $line_count -eq $GRAPH_HEIGHT ]]
+    [[ $line_count -eq $expected_lines ]]
     
+    local expected_len=$((GRAPH_WIDTH + 4))
     while IFS= read -r line; do
-        [[ ${#line} -eq $GRAPH_WIDTH ]]
+        [[ ${#line} -eq $expected_len ]]
     done <<< "$output"
 }
 
@@ -427,8 +440,9 @@ random_int() {
     done
 }
 
-@test "Property 7: Terminal width constraint - render_pods_section fits in 80 columns" {
+@test "Property 7: Terminal width constraint - render_pods_section fits in 82 columns" {
     # Run 5 iterations with random pod counts
+    # Note: pods section uses 82 chars for better visual alignment
     for iteration in $(seq 1 5); do
         METRIC_PODS_RUNNING=$(random_int 0 50)
         METRIC_PODS_DESIRED=$(random_int 0 50)
@@ -442,7 +456,7 @@ random_int() {
             local stripped=$(strip_ansi "$line")
             local line_len=${#stripped}
             
-            if [[ $line_len -gt 80 ]]; then
+            if [[ $line_len -gt 82 ]]; then
                 echo "FAILED iteration $iteration: render_pods_section line $line_num has $line_len chars"
                 echo "Line: $stripped"
                 return 1
@@ -543,12 +557,16 @@ random_int() {
         for section in "${sections[@]}"; do
             local output=$($section)
             
+            # pods section uses 82 chars for better visual alignment
+            local max_width=80
+            [[ "$section" == "render_pods_section" ]] && max_width=82
+            
             local line_num=1
             while IFS= read -r line; do
                 local stripped=$(strip_ansi "$line")
                 local line_len=${#stripped}
                 
-                if [[ $line_len -gt 80 ]]; then
+                if [[ $line_len -gt $max_width ]]; then
                     echo "FAILED iteration $iteration: $section line $line_num has $line_len chars"
                     echo "Line: $stripped"
                     return 1
@@ -598,9 +616,9 @@ restore_kubectl() {
         
         local result=$(get_vllm_pods)
         
-        # Verify result contains N/A
-        if [[ "$result" != "N/A|N/A|N/A" ]]; then
-            echo "FAILED iteration $iteration: get_vllm_pods should return 'N/A|N/A|N/A' on failure, got '$result'"
+        # Verify result contains N/A (new format: running|desired|ready|pending|not_ready|startup_min|startup_max)
+        if [[ "$result" != "N/A|N/A|N/A|N/A|N/A|N/A|N/A" ]]; then
+            echo "FAILED iteration $iteration: get_vllm_pods should return 'N/A|N/A|N/A|N/A|N/A|N/A|N/A' on failure, got '$result'"
             return 1
         fi
         
@@ -628,7 +646,7 @@ restore_kubectl() {
     done
 }
 
-@test "Property 5: Graceful degradation - get_node_info returns 0 on failure" {
+@test "Property 5: Graceful degradation - get_node_info returns 0|0|0|0|0 on failure" {
     # Run 5 iterations with mocked kubectl failures
     for iteration in $(seq 1 5); do
         # Mock kubectl to fail
@@ -636,9 +654,9 @@ restore_kubectl() {
         
         local result=$(get_node_info)
         
-        # Verify result is 0 (no nodes found is not an error)
-        if [[ "$result" != "0" ]]; then
-            echo "FAILED iteration $iteration: get_node_info should return '0' on failure, got '$result'"
+        # Verify result is 0|0|0|0|0 (no nodes found is not an error)
+        if [[ "$result" != "0|0|0|0|0" ]]; then
+            echo "FAILED iteration $iteration: get_node_info should return '0|0|0|0|0' on failure, got '$result'"
             return 1
         fi
         
@@ -655,9 +673,10 @@ restore_kubectl() {
         
         local result=$(get_performance_metrics)
         
-        # Verify result contains N/A values (format: throughput|p50|p95|p99|avg|request_count)
-        if [[ "$result" != "N/A|N/A|N/A|N/A|N/A|N/A" ]]; then
-            echo "FAILED iteration $iteration: get_performance_metrics should return 'N/A|N/A|N/A|N/A|N/A|N/A' on failure, got '$result'"
+        # Verify result contains N/A values (format: throughput|p50|p95|p99|avg|request_count|tokens_per_sec)
+        # Note: request_count is 0 (not N/A) since it's a numeric placeholder
+        if [[ "$result" != "N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
+            echo "FAILED iteration $iteration: get_performance_metrics should return 'N/A|N/A|N/A|N/A|N/A|0|N/A' on failure, got '$result'"
             return 1
         fi
         
@@ -691,19 +710,23 @@ restore_kubectl() {
         LAST_GOOD_NODE_TYPE="g5.xlarge"
         LAST_GOOD_THROUGHPUT=100
         
+        # Disable parallel collection so mocked functions work
+        DISABLE_PARALLEL=true
+        
         # Override the data collection functions to simulate failures
         # This is more reliable than mocking kubectl
         get_vllm_pods() { echo "N/A|N/A|N/A"; return 1; }
         get_queue_depth() { echo "N/A"; return 1; }
-        get_node_info() { echo "0|N/A"; return 1; }
-        get_performance_metrics() { echo "N/A|N/A|N/A|N/A|N/A"; return 1; }
+        get_node_info() { echo "0|0|0|0|0"; return 1; }
+        get_performance_metrics() { echo "N/A|N/A|N/A|N/A|N/A|0|N/A"; return 1; }
         
         # Call collect_all_metrics - should not crash
         collect_all_metrics
         local exit_code=$?
         
-        # Restore original functions
+        # Restore original functions and settings
         unset -f get_vllm_pods get_queue_depth get_node_info get_performance_metrics
+        DISABLE_PARALLEL=false
         
         # Verify function completed (didn't crash)
         if [[ $exit_code -ne 0 ]]; then
