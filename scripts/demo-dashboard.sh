@@ -141,10 +141,12 @@ METRIC_NODES_SPOT=0
 METRIC_NODE_TYPE="N/A"
 METRIC_THROUGHPUT=0
 METRIC_TOKENS_PER_SEC=0
-METRIC_RESPONSE_P50=0
-METRIC_RESPONSE_P95=0
-METRIC_RESPONSE_P99=0
-METRIC_RESPONSE_AVG=0
+METRIC_TOKENS_PER_REQ=0
+METRIC_TTFT_P50=0
+METRIC_TTFT_P95=0
+METRIC_E2E_AVG=0
+METRIC_E2E_P50=0
+METRIC_E2E_P95=0
 METRIC_SCALING_STATUS="stable"
 METRIC_LAST_UPDATE=""
 METRIC_CURRENT_RPS=0
@@ -1195,6 +1197,27 @@ get_node_info() {
 }
 
 # -----------------------------------------------------------------------------
+# get_pod_timing_info - Collect vLLM pod timing information
+# Returns: Pipe-separated lines: name|phase|ready_status|start_time|ready_time
+# -----------------------------------------------------------------------------
+get_pod_timing_info() {
+    kubectl get pods -n default -l app=vllm -o json 2>/dev/null | jq -r '
+        .items[] | 
+        {
+            name: .metadata.name,
+            phase: .status.phase,
+            startTime: .status.startTime,
+            readyCondition: (.status.conditions[] | select(.type=="Ready"))
+        } |
+        .name + "|" + 
+        .phase + "|" + 
+        (if .readyCondition.status == "True" then "Ready" else "NotReady" end) + "|" +
+        .startTime + "|" +
+        (if .readyCondition.status == "True" then .readyCondition.lastTransitionTime else "" end)
+    ' 2>/dev/null || echo ""
+}
+
+# -----------------------------------------------------------------------------
 # get_performance_metrics - Get throughput and latency from OTel Prometheus
 # Requirements: 5.1, 5.2, 5.3, 5.4
 # Returns: throughput|p50|p95|p99|avg|request_count|tokens_per_sec pipe-separated values
@@ -1219,7 +1242,8 @@ get_performance_metrics() {
     if [[ -n "$raw_metrics" ]]; then
         # Get request count for RPS calculation
         local total_requests
-        total_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_request_success_total" "sum")
+        total_requests=$(echo "$raw_metrics" | awk '/^vllm[:_]request_success_total/ {sum+=$2} END {print int(sum)}')
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: total_requests=$total_requests" >> "$ERROR_LOG" 2>/dev/null
         if [[ -n "$total_requests" ]] && [[ "$total_requests" =~ ^[0-9]+$ ]]; then
             request_count=$total_requests
         fi
@@ -1298,139 +1322,157 @@ get_performance_metrics() {
             has_active_load=true
         fi
         
-        # Parse TTFT histogram buckets for percentiles (only if there's active load)
+        # Parse TTFT histogram buckets for percentiles
         # vllm_time_to_first_token_seconds_bucket{le="X"} gives cumulative counts
-        if [[ "$has_active_load" == "true" ]]; then
-            local ttft_data=""
-            while IFS= read -r line; do
-                if [[ "$line" =~ ^vllm[_:]time_to_first_token_seconds_bucket ]]; then
-                    ttft_data+="$line"$'\n'
-                fi
-            done <<< "$raw_metrics"
+        local ttft_data=""
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^vllm[_:]time_to_first_token_seconds_bucket ]]; then
+                ttft_data+="$line"$'\n'
+            fi
+        done <<< "$raw_metrics"
         
-            if [[ -n "$ttft_data" ]]; then
-                # Parse histogram buckets to estimate percentiles
-                # Format: vllm_time_to_first_token_seconds_bucket{le="0.5",...} count
-                local -a buckets=()
-                local -a counts=()
-                local total_count=0
-            
-                while IFS= read -r line; do
-                    [[ -z "$line" ]] && continue
-                    # Extract le value and count
-                    if [[ "$line" =~ le=\"([0-9.]+)\" ]]; then
-                        local le="${BASH_REMATCH[1]}"
-                        local count=$(echo "$line" | awk '{print $NF}')
-                        if [[ "$count" =~ ^[0-9]+$ ]]; then
-                            buckets+=("$le")
-                            counts+=("$count")
-                            total_count=$count  # Last bucket is total
-                        fi
-                    fi
-                done <<< "$ttft_data"
-            
-                # Calculate percentiles from histogram
-                if [[ $total_count -gt 0 ]] && [[ ${#buckets[@]} -gt 0 ]]; then
-                    local p50_target=$((total_count * 50 / 100))
-                    local p95_target=$((total_count * 95 / 100))
-                
-                    for i in "${!buckets[@]}"; do
-                        local bucket_le="${buckets[$i]}"
-                        local bucket_count="${counts[$i]}"
-                    
-                        # Convert seconds to milliseconds
-                        local ms_value=$(echo "$bucket_le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
-                        [[ -z "$ms_value" ]] && ms_value=0
-                    
-                        if [[ "$ttft_p50" == "N/A" ]] && [[ $bucket_count -ge $p50_target ]]; then
-                            ttft_p50=$ms_value
-                        fi
-                        if [[ "$ttft_p95" == "N/A" ]] && [[ $bucket_count -ge $p95_target ]]; then
-                            ttft_p95=$ms_value
-                        fi
-                    done
-                fi
-            fi
-            
-            # Calculate average latency from histogram sum and count
-            # vllm_e2e_request_latency_seconds_sum / vllm_e2e_request_latency_seconds_count
-            local latency_sum=""
-            local latency_count=""
-            
+        if [[ -n "$ttft_data" ]]; then
+            # Parse histogram buckets to estimate percentiles
+            # Format: vllm_time_to_first_token_seconds_bucket{le="0.5",...} count
+            local -a buckets=()
+            local -a counts=()
+            local total_count=0
+        
             while IFS= read -r line; do
-                if [[ "$line" =~ ^vllm[_:]e2e_request_latency_seconds_sum ]]; then
-                    latency_sum=$(echo "$line" | awk '{print $(NF-1)}')
-                    # If no timestamp, use last field
-                    if ! [[ "$latency_sum" =~ ^[0-9.]+$ ]]; then
-                        latency_sum=$(echo "$line" | awk '{print $NF}')
+                [[ -z "$line" ]] && continue
+                # Extract le value and count
+                if [[ "$line" =~ le=\"([0-9.]+)\" ]]; then
+                    local le="${BASH_REMATCH[1]}"
+                    local count=$(echo "$line" | awk '{print $NF}')
+                    if [[ "$count" =~ ^[0-9]+$ ]]; then
+                        buckets+=("$le")
+                        counts+=("$count")
+                        total_count=$count  # Last bucket is total
                     fi
                 fi
-                if [[ "$line" =~ ^vllm[_:]e2e_request_latency_seconds_count ]]; then
-                    latency_count=$(echo "$line" | awk '{print $(NF-1)}')
-                    # If no timestamp, use last field
-                    if ! [[ "$latency_count" =~ ^[0-9.]+$ ]]; then
-                        latency_count=$(echo "$line" | awk '{print $NF}')
-                    fi
-                fi
-            done <<< "$raw_metrics"
+            done <<< "$ttft_data"
+        
+            # Calculate percentiles from histogram
+            if [[ $total_count -gt 0 ]] && [[ ${#buckets[@]} -gt 0 ]]; then
+                local p50_target=$((total_count * 50 / 100))
+                local p95_target=$((total_count * 95 / 100))
             
-            if [[ -n "$latency_sum" ]] && [[ -n "$latency_count" ]] && [[ "$latency_count" =~ ^[0-9]+$ ]] && [[ $latency_count -gt 0 ]]; then
-                # Calculate average e2e latency in milliseconds
-                local avg_seconds
-                avg_seconds=$(echo "scale=3; $latency_sum / $latency_count" | bc 2>/dev/null)
-                if [[ -n "$avg_seconds" ]]; then
-                    e2e_avg=$(echo "$avg_seconds * 1000" | bc 2>/dev/null | cut -d'.' -f1)
-                    [[ -z "$e2e_avg" ]] && e2e_avg="N/A"
-                fi
-            fi
-            
-            # Calculate E2E p50 and p95 from histogram buckets
-            local e2e_data=""
-            while IFS= read -r line; do
-                if [[ "$line" =~ ^vllm_e2e_request_latency_seconds_bucket ]]; then
-                    e2e_data+="$line"$'\n'
-                fi
-            done <<< "$raw_metrics"
-            
-            if [[ -n "$e2e_data" ]]; then
-                # Aggregate bucket counts across all pods
-                local -A bucket_totals
-                while IFS= read -r line; do
-                    [[ -z "$line" ]] && continue
-                    local le=$(echo "$line" | sed -n 's/.*le="\([^"]*\)".*/\1/p')
-                    local count=$(echo "$line" | awk '{print $(NF-1)}')
-                    if ! [[ "$count" =~ ^[0-9.]+$ ]]; then
-                        count=$(echo "$line" | awk '{print $NF}')
-                    fi
-                    if [[ "$le" != "+Inf" ]] && [[ -n "$count" ]] && [[ "$count" =~ ^[0-9]+$ ]]; then
-                        bucket_totals[$le]=$(( ${bucket_totals[$le]:-0} + count ))
-                    fi
-                done <<< "$e2e_data"
+                for i in "${!buckets[@]}"; do
+                    local bucket_le="${buckets[$i]}"
+                    local bucket_count="${counts[$i]}"
                 
-                # Sort buckets and find percentiles
-                local sorted_buckets=($(for k in "${!bucket_totals[@]}"; do echo "$k"; done | sort -n))
-                if [[ ${#sorted_buckets[@]} -gt 0 ]]; then
-                    local total_count="${bucket_totals[${sorted_buckets[-1]}]}"
-                    if [[ "$total_count" =~ ^[0-9]+$ ]] && [[ $total_count -gt 0 ]]; then
-                        local p50_target=$(( total_count / 2 ))
-                        local p95_target=$(( total_count * 95 / 100 ))
-                        
-                        for le in "${sorted_buckets[@]}"; do
-                            local count="${bucket_totals[$le]}"
-                            if [[ "$e2e_p50" == "N/A" ]] && [[ $count -ge $p50_target ]]; then
-                                e2e_p50=$(echo "$le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
-                            fi
-                            if [[ "$e2e_p95" == "N/A" ]] && [[ $count -ge $p95_target ]]; then
-                                e2e_p95=$(echo "$le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
-                            fi
-                        done
+                    # Convert seconds to milliseconds
+                    local ms_value=$(echo "$bucket_le * 1000" | bc 2>/dev/null | cut -d'.' -f1)
+                    [[ -z "$ms_value" ]] && ms_value=0
+                
+                    if [[ "$ttft_p50" == "N/A" ]] && [[ $bucket_count -ge $p50_target ]]; then
+                        ttft_p50=$ms_value
                     fi
-                fi
+                    if [[ "$ttft_p95" == "N/A" ]] && [[ $bucket_count -ge $p95_target ]]; then
+                        ttft_p95=$ms_value
+                    fi
+                done
             fi
-        fi  # end has_active_load check
+        fi
+        
+        # Calculate average latency from histogram sum and count
+        # vllm:e2e_request_latency_seconds_sum / vllm:e2e_request_latency_seconds_count
+        local latency_sum
+        local latency_count
+        latency_sum=$(echo "$raw_metrics" | awk '/^vllm[:_]e2e_request_latency_seconds_sum/ {sum+=$2} END {print sum}')
+        latency_count=$(echo "$raw_metrics" | awk '/^vllm[:_]e2e_request_latency_seconds_count/ {sum+=$2} END {print int(sum)}')
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: latency_sum=$latency_sum, latency_count=$latency_count" >> "$ERROR_LOG" 2>/dev/null
+        
+        if [[ -n "$latency_sum" ]] && [[ -n "$latency_count" ]] && [[ "$latency_count" =~ ^[0-9]+$ ]] && [[ $latency_count -gt 0 ]]; then
+            # Calculate average e2e latency in milliseconds
+            local avg_seconds
+            avg_seconds=$(echo "scale=3; $latency_sum / $latency_count" | bc 2>/dev/null)
+            if [[ -n "$avg_seconds" ]]; then
+                e2e_avg=$(printf "%.0f" $(echo "$avg_seconds * 1000" | bc 2>/dev/null))
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: e2e_avg=$e2e_avg" >> "$ERROR_LOG" 2>/dev/null
+                [[ -z "$e2e_avg" ]] && e2e_avg="N/A"
+            fi
+        fi
+        
+        # Calculate E2E p50 and p95 from histogram buckets
+        local e2e_data=""
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^vllm[:_]e2e_request_latency_seconds_bucket ]]; then
+                e2e_data+="$line"$'\n'
+            fi
+        done <<< "$raw_metrics"
+        
+        if [[ -n "$e2e_data" ]]; then
+            # Bash 3.2 and BSD awk compatible: use sed/awk to aggregate and calculate percentiles
+            local e2e_result
+            e2e_result=$(echo "$e2e_data" | awk '
+            BEGIN { n = 0 }
+            {
+                # Extract le value using gsub - works on BSD awk
+                line = $0
+                # Find le="X" pattern and extract X
+                if (index(line, "le=\"") == 0) next
+                # Remove everything before le="
+                sub(/.*le="/, "", line)
+                # Remove everything after the closing quote
+                sub(/".*/, "", line)
+                le = line
+                if (le == "" || le == "+Inf") next
+                
+                # Extract count - last field before optional timestamp
+                # OTel format: metric{labels} value timestamp
+                count = $(NF-1)
+                if (count !~ /^[0-9]+$/) count = $NF
+                if (count !~ /^[0-9]+$/) next
+                
+                # Aggregate by bucket
+                bucket_count[le] += count
+                if (!(le in seen)) {
+                    buckets[n++] = le
+                    seen[le] = 1
+                }
+            }
+            END {
+                if (n == 0) exit
+                # Sort buckets numerically
+                for (i = 0; i < n-1; i++) {
+                    for (j = i+1; j < n; j++) {
+                        if (buckets[i]+0 > buckets[j]+0) {
+                            tmp = buckets[i]
+                            buckets[i] = buckets[j]
+                            buckets[j] = tmp
+                        }
+                    }
+                }
+                # Total is the highest bucket count
+                total = bucket_count[buckets[n-1]]
+                if (total <= 0) exit
+                p50_target = int(total / 2)
+                p95_target = int(total * 95 / 100)
+                p50 = "N/A"; p95 = "N/A"
+                for (i = 0; i < n; i++) {
+                    le = buckets[i]
+                    cnt = bucket_count[le]
+                    ms = int(le * 1000)
+                    if (p50 == "N/A" && cnt >= p50_target) p50 = ms
+                    if (p95 == "N/A" && cnt >= p95_target) p95 = ms
+                }
+                print p50 "|" p95
+            }')
+            if [[ -n "$e2e_result" ]]; then
+                local e2e_p50_val="${e2e_result%%|*}"
+                local e2e_p95_val="${e2e_result##*|}"
+                [[ "$e2e_p50_val" != "N/A" ]] && e2e_p50="$e2e_p50_val"
+                [[ "$e2e_p95_val" != "N/A" ]] && e2e_p95="$e2e_p95_val"
+            fi
+        fi
     fi
     
+    # Debug: log all values right before output
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: FINAL VALUES - throughput=$throughput ttft_p50=$ttft_p50 ttft_p95=$ttft_p95 e2e_avg=$e2e_avg e2e_p50=$e2e_p50 e2e_p95=$e2e_p95 tokens_per_req=$tokens_per_req request_count=$request_count tokens_per_sec=$tokens_per_sec" >> "$ERROR_LOG" 2>/dev/null
+    
     # Output the metrics: throughput|ttft_p50|ttft_p95|e2e_avg|e2e_p50|e2e_p95|tokens_per_req|request_count|tokens_per_sec
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: OUTPUT=${throughput}|${ttft_p50}|${ttft_p95}|${e2e_avg}|${e2e_p50}|${e2e_p95}|${tokens_per_req}|${request_count}|${tokens_per_sec}" >> "$ERROR_LOG" 2>/dev/null
     echo "${throughput}|${ttft_p50}|${ttft_p95}|${e2e_avg}|${e2e_p50}|${e2e_p95}|${tokens_per_req}|${request_count}|${tokens_per_sec}"
     
     # Log tracking variables to file for debugging (not to stdout)
@@ -2002,6 +2044,83 @@ render_performance_section() {
 }
 
 # -----------------------------------------------------------------------------
+# render_pod_timing_panel - Display vLLM pod timing information
+# Output: Renders pod timing table to stdout
+# -----------------------------------------------------------------------------
+render_pod_timing_panel() {
+    local pod_data="${POD_TIMING_DATA:-}"
+    
+    # Panel width: 60 chars (58 inner + 2 borders)
+    local panel_width=58
+    
+    # Section header
+    printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} vLLM Pods ${NC}${BOLD_CYAN}"
+    for ((i=0; i<46; i++)); do printf "${BOX_L_H}"; done
+    printf "${BOX_L_TR}${NC}\n"
+    
+    # Table header
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} ${BOLD}%-18s %-8s %-8s %-8s %-6s${NC}" "Pod" "Status" "Start" "Ready" "Time"
+    printf " ${BOLD_CYAN}${BOX_L_V}${NC}\n"
+    
+    # Separator
+    printf "${BOLD_CYAN}${BOX_L_V}"
+    for ((i=0; i<panel_width; i++)); do printf "${BOX_L_H}"; done
+    printf "${BOX_L_V}${NC}\n"
+    
+    if [[ -z "$pod_data" ]]; then
+        printf "${BOLD_CYAN}${BOX_L_V}${NC} ${COLOR_MUTED}No pods found${NC}"
+        printf "%*s${BOLD_CYAN}${BOX_L_V}${NC}\n" "$((panel_width - 14))" ""
+    else
+        while IFS='|' read -r name phase ready_status start_time ready_time; do
+            [[ -z "$name" ]] && continue
+            
+            # Shorten pod name (keep last 16 chars)
+            local short_name="${name: -16}"
+            
+            # Format status
+            local status_display="$ready_status"
+            local status_color="$COLOR_INFO"
+            [[ "$ready_status" == "Ready" ]] && status_color="$COLOR_GOOD"
+            [[ "$ready_status" == "NotReady" ]] && status_color="$COLOR_WARNING"
+            [[ "$phase" == "Failed" ]] && status_color="$COLOR_ERROR" && status_display="Failed"
+            [[ "$phase" == "Pending" ]] && status_color="$COLOR_WARNING" && status_display="Pending"
+            
+            # Format times (HH:MM:SS)
+            local start_display="N/A"
+            if [[ -n "$start_time" ]]; then
+                start_display=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" "+%H:%M:%S" 2>/dev/null || echo "N/A")
+            fi
+            
+            local ready_display="N/A"
+            local time_display="N/A"
+            if [[ -n "$ready_time" ]] && [[ "$ready_status" == "Ready" ]]; then
+                ready_display=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%H:%M:%S" 2>/dev/null || echo "N/A")
+                
+                # Calculate time to ready in seconds
+                if [[ "$start_display" != "N/A" ]] && [[ "$ready_display" != "N/A" ]]; then
+                    local start_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" "+%s" 2>/dev/null)
+                    local ready_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%s" 2>/dev/null)
+                    if [[ -n "$start_epoch" ]] && [[ -n "$ready_epoch" ]]; then
+                        time_display=$((ready_epoch - start_epoch))
+                        time_display="${time_display}s"
+                    fi
+                fi
+            fi
+            
+            # Print row
+            printf "${BOLD_CYAN}${BOX_L_V}${NC} %-18s ${status_color}%-8s${NC} %-8s %-8s %-6s" \
+                "$short_name" "$status_display" "$start_display" "$ready_display" "$time_display"
+            printf " ${BOLD_CYAN}${BOX_L_V}${NC}\n"
+        done <<< "$pod_data"
+    fi
+    
+    # Section footer
+    printf "${BOLD_CYAN}${BOX_L_BL}"
+    for ((i=0; i<panel_width; i++)); do printf "${BOX_L_H}"; done
+    printf "${BOX_L_BR}${NC}\n"
+}
+
+# -----------------------------------------------------------------------------
 # render_insights_section - Display key insights based on current metrics
 # Requirements: 7.1 (organized layout), 7.4 (consistent color coding)
 # Output: Renders key insights section to stdout
@@ -2102,9 +2221,8 @@ render_footer() {
     # Render insights section first
     render_insights_section
     
-    # Footer line with controls
+    # Footer line - just a blank line for spacing
     printf "\n"
-    printf "${COLOR_MUTED}${BOX_L_H}${BOX_L_H}${BOX_L_H} Press ${BOLD}Ctrl+C${NC}${COLOR_MUTED} to exit ${BOX_L_H} Refresh: ${REFRESH_INTERVAL}s ${BOX_L_H}${BOX_L_H}${BOX_L_H}${NC}\n"
 }
 
 # =============================================================================
@@ -2137,7 +2255,7 @@ collect_all_metrics() {
         pod_info=$(get_vllm_pods 2>/dev/null) || pod_info="N/A|N/A|N/A|N/A|N/A"
         queue_depth=$(get_queue_depth 2>/dev/null) || queue_depth="N/A"
         node_info=$(get_node_info 2>/dev/null) || node_info="0|0|0"
-        perf_metrics=$(get_performance_metrics 2>/dev/null) || perf_metrics="N/A|N/A|N/A|N/A|N/A|0"
+        perf_metrics=$(get_performance_metrics 2>/dev/null) || perf_metrics="N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A"
     else
         # Create temp files for parallel collection results
         local tmp_pods=$(mktemp)
@@ -2156,7 +2274,7 @@ collect_all_metrics() {
         (get_node_info 2>/dev/null || echo "0|0|0") > "$tmp_nodes" &
         local pid_nodes=$!
         
-        (get_performance_metrics 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|0") > "$tmp_perf" &
+        (get_performance_metrics 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A") > "$tmp_perf" &
         local pid_perf=$!
         
         # Wait for all background processes to complete
@@ -2272,14 +2390,17 @@ collect_all_metrics() {
     fi
     
     # Process performance metrics
-    if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|0" ]]; then
+    # Format: throughput|ttft_p50|ttft_p95|e2e_avg|e2e_p50|e2e_p95|tokens_per_req|request_count|tokens_per_sec
+    if [[ -n "$perf_metrics" ]] && [[ "$perf_metrics" != "N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
         METRIC_THROUGHPUT=$(echo "$perf_metrics" | cut -d'|' -f1)
-        METRIC_RESPONSE_P50=$(echo "$perf_metrics" | cut -d'|' -f2)
-        METRIC_RESPONSE_P95=$(echo "$perf_metrics" | cut -d'|' -f3)
-        METRIC_RESPONSE_P99=$(echo "$perf_metrics" | cut -d'|' -f4)
-        METRIC_RESPONSE_AVG=$(echo "$perf_metrics" | cut -d'|' -f5)
-        local request_count=$(echo "$perf_metrics" | cut -d'|' -f6)
-        METRIC_TOKENS_PER_SEC=$(echo "$perf_metrics" | cut -d'|' -f7)
+        METRIC_TTFT_P50=$(echo "$perf_metrics" | cut -d'|' -f2)
+        METRIC_TTFT_P95=$(echo "$perf_metrics" | cut -d'|' -f3)
+        METRIC_E2E_AVG=$(echo "$perf_metrics" | cut -d'|' -f4)
+        METRIC_E2E_P50=$(echo "$perf_metrics" | cut -d'|' -f5)
+        METRIC_E2E_P95=$(echo "$perf_metrics" | cut -d'|' -f6)
+        METRIC_TOKENS_PER_REQ=$(echo "$perf_metrics" | cut -d'|' -f7)
+        local request_count=$(echo "$perf_metrics" | cut -d'|' -f8)
+        METRIC_TOKENS_PER_SEC=$(echo "$perf_metrics" | cut -d'|' -f9)
         
         # Update last known good values
         [[ "$METRIC_THROUGHPUT" != "N/A" ]] && LAST_GOOD_THROUGHPUT="$METRIC_THROUGHPUT"
@@ -2289,10 +2410,12 @@ collect_all_metrics() {
         # Use last known good values and mark as stale
         METRIC_THROUGHPUT="${LAST_GOOD_THROUGHPUT:-N/A}"
         METRIC_TOKENS_PER_SEC="${LAST_GOOD_TOKENS_PER_SEC:-N/A}"
-        METRIC_RESPONSE_P50="N/A"
-        METRIC_RESPONSE_P95="N/A"
-        METRIC_RESPONSE_P99="N/A"
-        METRIC_RESPONSE_AVG="N/A"
+        METRIC_TTFT_P50="N/A"
+        METRIC_TTFT_P95="N/A"
+        METRIC_E2E_AVG="N/A"
+        METRIC_E2E_P50="N/A"
+        METRIC_E2E_P95="N/A"
+        METRIC_TOKENS_PER_REQ="N/A"
         STALE_PERFORMANCE=true
         log_error "Failed to collect performance metrics, using last known values"
     fi
@@ -2330,6 +2453,7 @@ collect_all_metrics_async() {
     local tmp_queue=$(mktemp)
     local tmp_nodes=$(mktemp)
     local tmp_perf=$(mktemp)
+    local tmp_pod_timing=$(mktemp)
     
     # Collect all metrics in parallel
     (get_vllm_pods 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A") > "$tmp_pods" &
@@ -2341,23 +2465,30 @@ collect_all_metrics_async() {
     (get_node_info 2>/dev/null || echo "0|0|0") > "$tmp_nodes" &
     local pid_nodes=$!
     
-    (get_performance_metrics 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|0") > "$tmp_perf" &
+    (get_performance_metrics 2>/dev/null || echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A") > "$tmp_perf" &
     local pid_perf=$!
     
+    (get_pod_timing_info 2>/dev/null || echo "") > "$tmp_pod_timing" &
+    local pid_pod_timing=$!
+    
     # Wait for all to complete
-    wait $pid_pods $pid_queue $pid_nodes $pid_perf 2>/dev/null
+    wait $pid_pods $pid_queue $pid_nodes $pid_perf $pid_pod_timing 2>/dev/null
     
     # Read results
     pod_info=$(cat "$tmp_pods")
     queue_depth=$(cat "$tmp_queue")
     node_info=$(cat "$tmp_nodes")
     perf_metrics=$(cat "$tmp_perf")
+    pod_timing_data=$(cat "$tmp_pod_timing")
     
     # Clean up temp files
-    rm -f "$tmp_pods" "$tmp_queue" "$tmp_nodes" "$tmp_perf"
+    rm -f "$tmp_pods" "$tmp_queue" "$tmp_nodes" "$tmp_perf" "$tmp_pod_timing"
     
     # Write results as shell variable assignments to output file
     {
+        # Store pod timing data
+        echo "POD_TIMING_DATA='$pod_timing_data'"
+        
         # Process pod info (format: running|desired|ready|pending|not_ready|startup_min|startup_max)
         if [[ -n "$pod_info" ]] && [[ "$pod_info" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\| ]]; then
             echo "METRIC_PODS_RUNNING='$(echo "$pod_info" | cut -d'|' -f1)'"
@@ -2510,7 +2641,6 @@ render_dashboard() {
     render_footer
     
     # Clear any remaining content from previous renders
-    # This handles cases where the new render is shorter than the previous one
     printf "${CLEAR_LINE}"
 }
 

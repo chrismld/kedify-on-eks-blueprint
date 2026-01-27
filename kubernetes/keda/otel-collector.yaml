@@ -92,6 +92,8 @@ spec:
             metric_names:
               - vllm:num_requests_waiting
               - vllm_num_requests_waiting
+              - vllm:num_requests_running
+              - vllm_num_requests_running
 
       # Filter for dashboard metrics (includes more metrics)
       filter/metrics_dashboard:

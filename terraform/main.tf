@@ -71,14 +71,14 @@ module "eks" {
         service_account = "ebs-csi-controller-sa"
       }]
     }
-    # EFS CSI driver removed - using S3 for model storage instead
-    # aws-efs-csi-driver = {
-    #   most_recent = true
-    #   pod_identity_association = [{
-    #     role_arn        = module.aws_efs_csi_pod_identity.iam_role_arn
-    #     service_account = "efs-csi-controller-sa"
-    #   }]
-    # }
+    # EFS CSI driver for torch.compile cache (shared across pods)
+    aws-efs-csi-driver = {
+      most_recent = true
+      pod_identity_association = [{
+        role_arn        = module.aws_efs_csi_pod_identity.iam_role_arn
+        service_account = "efs-csi-controller-sa"
+      }]
+    }
     coredns = {
       most_recent = true
     }
@@ -109,6 +109,10 @@ module "eks" {
       max_size       = 2
       desired_size   = 2
       min_size       = 2
+
+      # Pin AMI to avoid automatic updates during terraform apply
+      ami_type        = "AL2023_x86_64_STANDARD"
+      use_latest_ami_release_version = false
 
       labels = {
         "CriticalAddonsOnly" = "true"

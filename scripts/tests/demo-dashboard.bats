@@ -673,10 +673,10 @@ restore_kubectl() {
         
         local result=$(get_performance_metrics)
         
-        # Verify result contains N/A values (format: throughput|p50|p95|p99|avg|request_count|tokens_per_sec)
+        # Verify result contains N/A values (format: throughput|ttft_p50|ttft_p95|e2e_avg|e2e_p50|e2e_p95|tokens_per_req|request_count|tokens_per_sec)
         # Note: request_count is 0 (not N/A) since it's a numeric placeholder
-        if [[ "$result" != "N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
-            echo "FAILED iteration $iteration: get_performance_metrics should return 'N/A|N/A|N/A|N/A|N/A|0|N/A' on failure, got '$result'"
+        if [[ "$result" != "N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A" ]]; then
+            echo "FAILED iteration $iteration: get_performance_metrics should return 'N/A|N/A|N/A|N/A|N/A|N/A|N/A|0|N/A' on failure, got '$result'"
             return 1
         fi
         

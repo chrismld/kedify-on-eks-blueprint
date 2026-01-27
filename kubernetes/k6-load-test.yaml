@@ -8,49 +8,61 @@ data:
     import http from 'k6/http';
     import { check, sleep } from 'k6';
 
-    const questions = [
-      "How many lines does the London Underground have?",
-      "What is the oldest line on the Tube?",
-      "How many stations are on the Central Line?",
-      "Which line is the Circle Line?",
-      "What year did the Tube open?",
-      "Which station is the deepest?",
-      "How many passengers use the Tube daily?",
-      "What color is the Piccadilly Line?",
-      "Which line goes to Heathrow?",
-      "What is the shortest line on the Tube?",
-    ];
-
     export const options = {
       scenarios: {
-        ramp_up: {
+        aggressive_ramp: {
           executor: 'ramping-vus',
-          startVUs: 10,
+          startVUs: 5,
           stages: [
-            { duration: '30s', target: 50 },
-            { duration: '120s', target: 100 },
-            { duration: '120s', target: 100 },
-            { duration: '30s', target: 0 },
+            // Ramp to 30 VUs in 1 min (trigger proactive scaling)
+            { duration: '1m', target: 30 },
+            // Hold at 30 VUs for 2 min (let pods scale)
+            { duration: '2m', target: 30 },
+            // Ramp to 80 VUs in 1 min (aggressive load)
+            { duration: '1m', target: 80 },
+            // Hold at 80 VUs for 3 min (test at scale)
+            { duration: '3m', target: 80 },
+            // Ramp down
+            { duration: '1m', target: 0 },
           ],
         },
+      },
+      thresholds: {
+        http_req_duration: ['p(95)<15000'], // 95% under 15s
+        http_req_failed: ['rate<0.1'],      // Less than 10% failures
       },
     };
 
     export default function () {
-      const url = 'http://api:8000/api/question/submit';
+      const url = 'http://vllm-service.default.svc.cluster.local:8000/v1/completions';
+      
       const payload = JSON.stringify({
-        question: questions[Math.floor(Math.random() * questions.length)],
-        session_id: `k6_${__VU}_${__ITER}`,
+        model: 'TheBloke/Mistral-7B-Instruct-v0.2-AWQ',
+        prompt: 'Explain Kubernetes autoscaling in one sentence.',
+        max_tokens: 50,
+        temperature: 0.7,
       });
 
       const params = {
         headers: { 'Content-Type': 'application/json' },
-        timeout: '60s',
+        timeout: '30s',
       };
 
       const res = http.post(url, payload, params);
-      check(res, { 'status is 200': (r) => r.status === 200 });
-      sleep(0.5);
+      
+      check(res, {
+        'status is 200': (r) => r.status === 200,
+        'has completion': (r) => {
+          try {
+            const body = JSON.parse(r.body);
+            return body.choices && body.choices.length > 0;
+          } catch (e) {
+            return false;
+          }
+        },
+      });
+
+      // No sleep - send requests as fast as possible to build queue
     }
 ---
 apiVersion: batch/v1

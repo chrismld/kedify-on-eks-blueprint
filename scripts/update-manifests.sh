@@ -50,6 +50,9 @@ if [ -n "$MODELS_BUCKET" ]; then
 else
   echo "   Models S3: (not found - run 'make setup-infra' first)"
 fi
+if [ -n "$EFS_FILESYSTEM_ID" ]; then
+  echo "   EFS Cache: ${EFS_FILESYSTEM_ID}"
+fi
 echo ""
 
 # Update API deployment from template
@@ -98,6 +101,27 @@ else
     -e "s|\${CLUSTER_NAME}|${CLUSTER_NAME}|g" \
     -e '/snapshotID:/d' \
     kubernetes/karpenter/gpu-nodeclass.yaml.template > kubernetes/karpenter/gpu-nodeclass.yaml
+fi
+
+# Update torch.compile cache storage from template (EFS)
+# Get EFS filesystem ID from .demo-config or auto-detect via AWS CLI
+if [ -z "$EFS_FILESYSTEM_ID" ]; then
+  # Try to find EFS by name tag (created by terraform with name: ${cluster_name}-torch-cache)
+  EFS_FILESYSTEM_ID=$(aws efs describe-file-systems \
+    --query "FileSystems[?Name=='${CLUSTER_NAME}-torch-cache'].FileSystemId | [0]" \
+    --output text 2>/dev/null || echo "")
+  [ "$EFS_FILESYSTEM_ID" = "None" ] && EFS_FILESYSTEM_ID=""
+fi
+
+if [ -n "$EFS_FILESYSTEM_ID" ]; then
+  echo "📝 Generating kubernetes/vllm/torch-cache-storage.yaml from template..."
+  echo "   Using EFS filesystem: ${EFS_FILESYSTEM_ID}"
+  sed \
+    -e "s|EFS_FILESYSTEM_ID_PLACEHOLDER|${EFS_FILESYSTEM_ID}|g" \
+    kubernetes/vllm/torch-cache-storage.yaml.template > kubernetes/vllm/torch-cache-storage.yaml
+else
+  echo "⚠️  Skipping torch-cache-storage manifest (EFS not provisioned yet)"
+  echo "   Run 'terraform apply' first, then re-run this script"
 fi
 
 echo ""

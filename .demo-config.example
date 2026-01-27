@@ -24,6 +24,13 @@ MODEL_S3_PATH=models/mistral-7b-awq
 # Example: SNAPSHOT_ID=snap-0abc123def456789
 SNAPSHOT_ID=
 
+# EFS Filesystem ID for torch.compile cache (optional)
+# Auto-detected from terraform output if not set
+# This caches compiled PyTorch graphs across all vLLM pods
+# First pod compiles (~43s), subsequent pods skip compilation (~0s)
+# Example: EFS_FILESYSTEM_ID=fs-0abc123def456789
+EFS_FILESYSTEM_ID=
+
 # Frontend URL (optional)
 # If using CloudFront, set this to your CloudFront distribution URL
 # If not set, will use ALB URL from ingress
