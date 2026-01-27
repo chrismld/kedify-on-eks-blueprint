@@ -9,7 +9,7 @@ metadata:
 provisioner: efs.csi.aws.com
 parameters:
   provisioningMode: efs-ap
-  fileSystemId: ${EFS_FILESYSTEM_ID}
+  fileSystemId: fs-02eb356f3b70f223f
   directoryPerms: "755"
   basePath: "/torch-compile-cache"
 mountOptions:

@@ -55,20 +55,6 @@ resource "aws_security_group" "efs_torch_cache" {
 }
 
 ################################################################################
-# EFS CSI Driver Pod Identity
-################################################################################
-
-module "aws_efs_csi_pod_identity" {
-  source  = "terraform-aws-modules/eks-pod-identity/aws"
-  version = "2.2.1"
-
-  name                      = "aws-efs-csi"
-  attach_aws_efs_csi_policy = true
-
-  tags = local.tags
-}
-
-################################################################################
 # Outputs
 ################################################################################
 
