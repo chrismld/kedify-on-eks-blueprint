@@ -14,6 +14,14 @@ spec:
     spec:
       nodeSelector:
         intent: gpu-inference
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: karpenter.k8s.aws/instance-gpu-name
+                    operator: NotIn
+                    values: ["v100", "k80", "t4"]
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -23,8 +31,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 16Gi
-        # Shared EFS volume for torch.compile cache
-        # First pod compiles, all subsequent pods reuse cache instantly
         - name: torch-cache
           persistentVolumeClaim:
             claimName: torch-compile-cache
@@ -32,14 +38,6 @@ spec:
         - name: vllm
           image: REGISTRY_PLACEHOLDER/ecr-public/deep-learning-containers/vllm:0.13-gpu-py312-ec2
           imagePullPolicy: IfNotPresent
-          env:
-            # Enable torch.compile caching to shared EFS
-            - name: TORCHINDUCTOR_CACHE_DIR
-              value: "/mnt/torch-cache"
-            - name: TORCHINDUCTOR_FX_GRAPH_CACHE
-              value: "1"
-            - name: TORCHINDUCTOR_AUTOGRAD_CACHE
-              value: "1"
           args:
             - "--model"
             - "S3_MODEL_PATH_PLACEHOLDER"
@@ -56,6 +54,8 @@ spec:
             - "auto"
             - "--quantization"
             - "awq_marlin"
+            - "--cuda-graph-sizes"
+            - "1,2,4,8,16,24,32"
           ports:
             - name: api
               containerPort: 8000
@@ -72,9 +72,8 @@ spec:
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
-            # Mount shared torch.compile cache
             - name: torch-cache
-              mountPath: /mnt/torch-cache
+              mountPath: /root/.cache/vllm/torch_compile_cache
           readinessProbe:
             httpGet:
               path: /v1/models
@@ -90,14 +89,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 15
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 180
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 6
 ---
 apiVersion: v1
 kind: Service
