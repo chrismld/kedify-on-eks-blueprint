@@ -80,6 +80,14 @@ spec:
               mountPath: /dev/shm
             - name: torch-cache
               mountPath: /root/.cache/vllm/torch_compile_cache
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /v1/models

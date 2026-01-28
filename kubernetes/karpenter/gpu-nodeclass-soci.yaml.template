@@ -4,22 +4,15 @@ metadata:
   name: gpu-soci
 spec:
   role: "${CLUSTER_NAME}"
-  
-  # Use Bottlerocket AMI for GPU nodes
   amiSelectorTerms:
     - alias: "bottlerocket@latest"
-  
   subnetSelectorTerms:
     - tags:
         karpenter.sh/discovery: "${CLUSTER_NAME}"
-  
   securityGroupSelectorTerms:
     - tags:
         karpenter.sh/discovery: "${CLUSTER_NAME}"
-  
-  # Bottlerocket requires TWO block devices:
-  # - /dev/xvda: Control volume (OS)
-  # - /dev/xvdb: Data volume (NO snapshot - using SOCI for lazy loading)
+  instanceStorePolicy: RAID0
   blockDeviceMappings:
     - deviceName: /dev/xvda
       ebs:
@@ -29,16 +22,10 @@ spec:
         deleteOnTermination: true
     - deviceName: /dev/xvdb
       ebs:
-        volumeSize: 50Gi
+        volumeSize: 20Gi
         volumeType: gp3
-        iops: 3000
-        throughput: 600  # Increased throughput for SOCI parallel downloads
         encrypted: true
         deleteOnTermination: true
-        # NO snapshotID - using SOCI snapshotter instead
-  
-  # Bottlerocket userData with SOCI snapshotter configuration
-  # SOCI enables lazy loading of container images - only pulls layers as needed
   userData: |
     [settings.kubernetes]
     allowed-unsafe-sysctls = ["net.core.somaxconn"]
@@ -54,7 +41,6 @@ spec:
     concurrent-download-chunk-size = "16mb"
     max-concurrent-unpacks-per-image = 12
     discard-unpacked-layers = true
-  
   tags:
     Name: karpenter-gpu-soci
     intent: inference
