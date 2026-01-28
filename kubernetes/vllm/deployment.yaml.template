@@ -45,11 +45,11 @@ spec:
             - "--load-format"
             - "runai_streamer"
             - "--max-model-len"
-            - "2048"
+            - "4096"
             - "--max-num-seqs"
             - "32"
             - "--gpu-memory-utilization"
-            - "0.95"
+            - "0.90"
             - "--dtype"
             - "auto"
             - "--quantization"
@@ -87,14 +87,6 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
-          startupProbe:
-            httpGet:
-              path: /v1/models
-              port: 8000
-            initialDelaySeconds: 120
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 15
 ---
 apiVersion: v1
 kind: Service

@@ -1,13 +1,5 @@
 #!/bin/bash
 
-# =============================================================================
-# Demo Dashboard Right Panel - vLLM Pod Timing Monitor
-# =============================================================================
-# Companion script to demo-dashboard.sh showing pod timing information
-# Usage: ./demo-dashboard-right.sh
-# =============================================================================
-
-# Color Constants
 NC='\033[0m'
 BOLD='\033[1m'
 BOLD_CYAN='\033[1;36m'
@@ -18,7 +10,6 @@ COLOR_ERROR='\033[38;5;196m'
 COLOR_INFO='\033[38;5;51m'
 COLOR_MUTED='\033[38;5;245m'
 
-# Box drawing characters
 BOX_L_TL='┌'
 BOX_L_TR='┐'
 BOX_L_BL='└'
@@ -26,71 +17,67 @@ BOX_L_BR='┘'
 BOX_L_H='─'
 BOX_L_V='│'
 
-# ANSI control codes
 CURSOR_HOME='\033[H'
 CLEAR_SCREEN='\033[2J'
 CLEAR_LINE='\033[K'
 CURSOR_HIDE='\033[?25l'
 CURSOR_SHOW='\033[?25h'
 
-# Configuration
 REFRESH_INTERVAL=1
+MAX_ROWS=15
 
-# Cleanup on exit
 cleanup() {
     printf "${CURSOR_SHOW}${NC}"
     exit 0
 }
 trap cleanup SIGINT SIGTERM EXIT
 
-# Get pod timing info
 get_pod_timing_info() {
     kubectl get pods -n default -l app=vllm -o json 2>/dev/null | jq -r '
         .items[] | 
         {
             name: .metadata.name,
             phase: .status.phase,
-            startTime: .status.startTime,
+            creationTime: .metadata.creationTimestamp,
+            scheduledCondition: (.status.conditions[] | select(.type=="PodScheduled") | .lastTransitionTime // ""),
             readyCondition: (.status.conditions[] | select(.type=="Ready"))
         } |
         .name + "|" + 
         .phase + "|" + 
         (if .readyCondition.status == "True" then "Ready" else "NotReady" end) + "|" +
-        .startTime + "|" +
+        .creationTime + "|" +
+        .scheduledCondition + "|" +
         (if .readyCondition.status == "True" then .readyCondition.lastTransitionTime else "" end)
     ' 2>/dev/null || echo ""
 }
 
-# Render pod timing panel
 render_pod_timing_panel() {
     local pod_data="$1"
     local panel_width=58
     
-    # Section header
     printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} vLLM Pods ${NC}${BOLD_CYAN}"
     for ((i=0; i<46; i++)); do printf "${BOX_L_H}"; done
-    printf "${BOX_L_TR}${NC}\n"
+    printf "${BOX_L_TR}${NC}${CLEAR_LINE}\n"
     
-    # Table header
-    printf "${BOLD_CYAN}${BOX_L_V}${NC} ${BOLD}%-18s %-8s %-8s %-8s %-6s${NC}" "Pod" "Status" "Start" "Ready" "Time"
-    printf "     ${BOLD_CYAN}${BOX_L_V}${NC}\n"
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} ${BOLD}%-18s %-10s %-8s %-8s %-6s${NC}" "Name" "Status" "Node" "Pod" "Total"
+    printf "   ${BOLD_CYAN}${BOX_L_V}${NC}${CLEAR_LINE}\n"
     
-    # Separator
     printf "${BOLD_CYAN}${BOX_L_V}"
     for ((i=0; i<panel_width; i++)); do printf "${BOX_L_H}"; done
-    printf "${BOX_L_V}${NC}\n"
+    printf "${BOX_L_V}${NC}${CLEAR_LINE}\n"
+    
+    local row_count=0
     
     if [[ -z "$pod_data" ]]; then
         printf "${BOLD_CYAN}${BOX_L_V}${NC} ${COLOR_MUTED}No pods found${NC}"
-        printf "%*s${BOLD_CYAN}${BOX_L_V}${NC}\n" "$((panel_width - 14))" ""
+        printf "%*s${BOLD_CYAN}${BOX_L_V}${NC}${CLEAR_LINE}\n" "$((panel_width - 14))" ""
+        row_count=1
     else
-        while IFS='|' read -r name phase ready_status start_time ready_time; do
+        while IFS='|' read -r name phase ready_status creation_time scheduled_time ready_time; do
             [[ -z "$name" ]] && continue
             
-            # Shorten pod name (keep last 16 chars)
             local short_name="${name: -16}"
             
-            # Format status
             local status_display="$ready_status"
             local status_color="$COLOR_INFO"
             [[ "$ready_status" == "Ready" ]] && status_color="$COLOR_GOOD"
@@ -98,51 +85,63 @@ render_pod_timing_panel() {
             [[ "$phase" == "Failed" ]] && status_color="$COLOR_ERROR" && status_display="Failed"
             [[ "$phase" == "Pending" ]] && status_color="$COLOR_WARNING" && status_display="Pending"
             
-            # Format times (HH:MM:SS)
-            local start_display="N/A"
-            if [[ -n "$start_time" ]]; then
-                start_display=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" "+%H:%M:%S" 2>/dev/null || echo "N/A")
-            fi
+            local node_time_display="-"
+            local pod_time_display="-"
+            local total_time_display="-"
             
-            local ready_display="N/A"
-            local time_display="N/A"
-            if [[ -n "$ready_time" ]] && [[ "$ready_status" == "Ready" ]]; then
-                ready_display=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%H:%M:%S" 2>/dev/null || echo "N/A")
-                
-                # Calculate time to ready in seconds
-                if [[ "$start_display" != "N/A" ]] && [[ "$ready_display" != "N/A" ]]; then
-                    local start_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_time" "+%s" 2>/dev/null)
-                    local ready_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%s" 2>/dev/null)
-                    if [[ -n "$start_epoch" ]] && [[ -n "$ready_epoch" ]]; then
-                        time_display=$((ready_epoch - start_epoch))
-                        time_display="${time_display}s"
-                    fi
+            if [[ -n "$creation_time" ]] && [[ -n "$scheduled_time" ]]; then
+                local creation_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$creation_time" "+%s" 2>/dev/null)
+                local scheduled_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$scheduled_time" "+%s" 2>/dev/null)
+                if [[ -n "$creation_epoch" ]] && [[ -n "$scheduled_epoch" ]]; then
+                    local node_secs=$((scheduled_epoch - creation_epoch))
+                    [[ $node_secs -lt 0 ]] && node_secs=0
+                    node_time_display="${node_secs}s"
                 fi
             fi
             
-            # Print row
-            printf "${BOLD_CYAN}${BOX_L_V}${NC} %-18s ${status_color}%-8s${NC} %-8s %-8s %-6s" \
-                "$short_name" "$status_display" "$start_display" "$ready_display" "$time_display"
-            printf "     ${BOLD_CYAN}${BOX_L_V}${NC}\n"
+            if [[ -n "$scheduled_time" ]] && [[ -n "$ready_time" ]] && [[ "$ready_status" == "Ready" ]]; then
+                local scheduled_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$scheduled_time" "+%s" 2>/dev/null)
+                local ready_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%s" 2>/dev/null)
+                if [[ -n "$scheduled_epoch" ]] && [[ -n "$ready_epoch" ]]; then
+                    local pod_secs=$((ready_epoch - scheduled_epoch))
+                    [[ $pod_secs -lt 0 ]] && pod_secs=0
+                    pod_time_display="${pod_secs}s"
+                fi
+            fi
+            
+            if [[ -n "$creation_time" ]] && [[ -n "$ready_time" ]] && [[ "$ready_status" == "Ready" ]]; then
+                local creation_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$creation_time" "+%s" 2>/dev/null)
+                local ready_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ready_time" "+%s" 2>/dev/null)
+                if [[ -n "$creation_epoch" ]] && [[ -n "$ready_epoch" ]]; then
+                    local total_secs=$((ready_epoch - creation_epoch))
+                    [[ $total_secs -lt 0 ]] && total_secs=0
+                    total_time_display="${total_secs}s"
+                fi
+            fi
+            
+            printf "${BOLD_CYAN}${BOX_L_V}${NC} %-18s ${status_color}%-10s${NC} %-8s %-8s %-6s" \
+                "$short_name" "$status_display" "$node_time_display" "$pod_time_display" "$total_time_display"
+            printf "   ${BOLD_CYAN}${BOX_L_V}${NC}${CLEAR_LINE}\n"
+            
+            ((row_count++))
         done <<< "$pod_data"
     fi
     
-    # Section footer
     printf "${BOLD_CYAN}${BOX_L_BL}"
     for ((i=0; i<panel_width; i++)); do printf "${BOX_L_H}"; done
-    printf "${BOX_L_BR}${NC}\n"
+    printf "${BOX_L_BR}${NC}${CLEAR_LINE}\n"
+    
+    for ((i=row_count; i<MAX_ROWS; i++)); do
+        printf "${CLEAR_LINE}\n"
+    done
 }
 
-# Main loop
 main() {
-    # Hide cursor and clear screen once
     printf "${CURSOR_HIDE}${CLEAR_SCREEN}${CURSOR_HOME}"
     
     while true; do
-        # Move to home
         printf "${CURSOR_HOME}"
         
-        # Add spacing to align with Load Graph (header + blank lines)
         echo ""
         echo ""
         echo ""
@@ -151,13 +150,9 @@ main() {
         echo ""
         echo ""
         
-        # Get pod timing data
         local pod_data=$(get_pod_timing_info)
-        
-        # Render panel
         render_pod_timing_panel "$pod_data"
         
-        # Wait for refresh interval
         sleep $REFRESH_INTERVAL
     done
 }

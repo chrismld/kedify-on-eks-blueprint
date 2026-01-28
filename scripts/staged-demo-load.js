@@ -19,14 +19,14 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
-        { duration: '15s', target: 20 },
-        { duration: '30s', target: 20 },
+        { duration: '15s', target: 10 },
+        { duration: '2m', target: 10 },
+        { duration: '15s', target: 25 },
+        { duration: '3m', target: 25 },
         { duration: '15s', target: 50 },
-        { duration: '1m', target: 50 },
-        { duration: '15s', target: 100 },
-        { duration: '2m', target: 100 },
-        { duration: '15s', target: 150 },
-        { duration: '3m', target: 150 },
+        { duration: '3m', target: 50 },
+        { duration: '15s', target: 75 },
+        { duration: '3m', target: 75 },
         { duration: '30s', target: 0 },
       ],
       gracefulRampDown: '30s',
@@ -84,5 +84,5 @@ export default function () {
     },
   })
 
-  sleep(0.1 + Math.random() * 0.2)
+  sleep(0.3 + Math.random() * 0.4)
 }
