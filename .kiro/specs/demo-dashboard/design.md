@@ -108,6 +108,20 @@ declare -A METRICS=(
     [scaling_status]="stable"
     [last_update]=""
 )
+
+# Session-persistent peak metrics (only reset on dashboard restart)
+SESSION_PEAK_RPS=0           # Peak requests per second observed
+SESSION_PEAK_TOKENS_SEC=0    # Peak tokens per second observed
+
+# Session-persistent performance metrics (only reset on dashboard restart)
+SESSION_RPS=""               # Last good RPS value
+SESSION_TOKENS_SEC=""        # Last good Tok/Sec value
+SESSION_TTFT_P50=""          # Last good TTFT p50 value
+SESSION_TTFT_P95=""          # Last good TTFT p95 value
+SESSION_E2E_AVG=""           # Last good E2E avg value
+SESSION_E2E_P50=""           # Last good E2E p50 value
+SESSION_E2E_P95=""           # Last good E2E p95 value
+SESSION_TOKENS_REQ=""        # Last good Tok/Req value
 ```
 
 ### Display Configuration
@@ -194,6 +208,12 @@ declare -A THRESHOLDS=(
 
 **Validates: Requirements 6.4**
 
+### Property 9: Performance Metrics Persistence
+
+*For any* performance metric (RPS, Tok/Sec, TTFT, E2E latencies, Tok/Req) that has a valid non-zero value, the session-persistent variable SHALL retain that value even when subsequent metric collections return zero or N/A. The persisted value SHALL only be updated when a new valid non-zero value is collected.
+
+**Validates: Requirements 9.1-9.8**
+
 ## Error Handling
 
 ### kubectl Command Failures
@@ -277,6 +297,12 @@ Property-based tests will use `bats-core` with custom generators to verify unive
    - Generate random metric values (including edge cases)
    - Render each section and verify no line exceeds 80 chars
    - **Feature: demo-dashboard, Property 7: Terminal width constraint**
+
+7. **Property 9 Test: Performance Metrics Persistence**
+   - Generate sequences with valid values followed by zeros/N/A
+   - Verify session variables retain last good values
+   - Verify display shows persisted values when current is zero/N/A
+   - **Feature: demo-dashboard, Property 9: Performance metrics persistence**
 
 ### Integration Tests
 

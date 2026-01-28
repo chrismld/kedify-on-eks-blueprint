@@ -125,6 +125,7 @@ LOAD_TIMESTAMPS=()
 
 # Current metrics (using individual variables for bash 3.2 compatibility)
 METRIC_QUEUE_DEPTH=0
+METRIC_RUNNING_REQUESTS=0
 METRIC_PODS_RUNNING=0
 METRIC_PODS_DESIRED=0
 METRIC_PODS_READY=0
@@ -164,6 +165,17 @@ LAST_GOOD_TOKENS_PER_SEC=0
 # Session-persistent startup times (only reset on dashboard start, not when pods scale down)
 SESSION_STARTUP_MIN=""
 SESSION_STARTUP_MAX=""
+
+# Session-persistent performance metrics (only reset on dashboard start)
+# These retain the last good values so they display after load test ends
+SESSION_RPS=""
+SESSION_TOKENS_SEC=""
+SESSION_TTFT_P50=""
+SESSION_TTFT_P95=""
+SESSION_E2E_AVG=""
+SESSION_E2E_P50=""
+SESSION_E2E_P95=""
+SESSION_TOKENS_REQ=""
 
 # Token tracking for tokens/s calculation
 LAST_TOKENS_TOTAL=0
@@ -1092,11 +1104,12 @@ parse_metric_from_raw() {
 # -----------------------------------------------------------------------------
 # get_queue_depth - Query OTel Prometheus for current vLLM queue depth metric
 # Requirements: 2.1, 8.1
-# Returns: integer queue depth value, or "0" on failure
+# Returns: queue_depth|running_requests pipe-separated values, or "0|0" on failure
 # Note: Uses OTel Prometheus endpoint (fast, <1 second)
 # -----------------------------------------------------------------------------
 get_queue_depth() {
     local queue_depth=""
+    local running_requests=""
     
     # Get raw metrics from OTel Prometheus endpoint
     local raw_metrics
@@ -1105,13 +1118,18 @@ get_queue_depth() {
     if [[ -n "$raw_metrics" ]]; then
         # Parse vllm_num_requests_waiting (sum across all pods)
         queue_depth=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_waiting" "sum")
-        if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
-            echo "$queue_depth"
-            return 0
-        fi
+        # Parse vllm_num_requests_running (sum across all pods)
+        running_requests=$(parse_metric_from_raw "$raw_metrics" "vllm_num_requests_running" "sum")
+        
+        # Validate and default values
+        [[ ! "$queue_depth" =~ ^[0-9]+$ ]] && queue_depth=0
+        [[ ! "$running_requests" =~ ^[0-9]+$ ]] && running_requests=0
+        
+        echo "${queue_depth}|${running_requests}"
+        return 0
     fi
     
-    # Fallback to HPA if OTel is not available
+    # Fallback to HPA if OTel is not available (only for queue depth)
     local hpa_metrics
     hpa_metrics=$(kubectl get hpa "keda-hpa-vllm-queue-scaler" \
         -n "$VLLM_NAMESPACE" \
@@ -1121,13 +1139,13 @@ get_queue_depth() {
     if [[ -n "$hpa_metrics" ]] && [[ "$hpa_metrics" != "null" ]]; then
         queue_depth=$(echo "$hpa_metrics" | sed 's/[^0-9.]//g' | cut -d'.' -f1)
         if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
-            echo "$queue_depth"
+            echo "${queue_depth}|0"
             return 0
         fi
     fi
     
-    # Default to 0 if no metrics available (system is idle)
-    echo "0"
+    # Default to 0|0 if no metrics available (system is idle)
+    echo "0|0"
     return 0
 }
 
@@ -1612,40 +1630,19 @@ render_load_section() {
 }
 
 # -----------------------------------------------------------------------------
-# render_queue_section - Display vLLM queue depth and scaling indicators
+# render_queue_section - Display vLLM scaling metrics (queue depth and running requests)
 # Requirements: 2.1 (queue depth), 2.2 (KEDA target), 2.3, 2.4 (scaling zone)
-# Output: Renders queue metrics section to stdout
+# Output: Renders scaling metrics section to stdout
 # -----------------------------------------------------------------------------
 render_queue_section() {
     local queue_depth="${METRIC_QUEUE_DEPTH:-0}"
+    local running_requests="${METRIC_RUNNING_REQUESTS:-0}"
     local queue_color
     queue_color=$(determine_status_color "queue" "$queue_depth")
     
-    # Determine scaling zone
-    local scaling_status
-    scaling_status=$(determine_scaling_status "queue" "$queue_depth" "$THRESHOLD_QUEUE_TARGET")
-    
-    local zone_label="STABLE"
-    local zone_color="$COLOR_GOOD"
-    local zone_icon="$INDICATOR_STABLE"
-    
-    case "$scaling_status" in
-        "scaling_up")
-            zone_label="SCALE-UP"
-            zone_color="$COLOR_WARNING"
-            zone_icon="$INDICATOR_UP"
-            ;;
-        "scaling_down")
-            zone_label="SCALE-DOWN"
-            zone_color="$COLOR_INFO"
-            zone_icon="$INDICATOR_DOWN"
-            ;;
-        *)
-            zone_label="STABLE"
-            zone_color="$COLOR_GOOD"
-            zone_icon="$INDICATOR_STABLE"
-            ;;
-    esac
+    # Color for running requests (similar logic to queue)
+    local running_color
+    running_color=$(determine_status_color "queue" "$running_requests")
     
     # Add stale indicator if needed
     local stale_marker=""
@@ -1654,35 +1651,45 @@ render_queue_section() {
     fi
     
     # Section header (78 inner + 2 borders = 80)
-    printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} Queue Depth ${NC}${BOLD_CYAN}"
-    for ((i=0; i<64; i++)); do printf "${BOX_L_H}"; done
+    printf "${BOLD_CYAN}${BOX_L_TL}${BOX_L_H}${NC}${BOLD_WHITE} Scaling Metrics (vLLM # of requests) ${NC}${BOLD_CYAN}"
+    for ((i=0; i<39; i++)); do printf "${BOX_L_H}"; done
     printf "${BOX_L_TR}${NC}\n"
     
-    # Queue depth display (fit in 78 chars)
+    # Scaling metrics display - aligned with bars below
     # Calculate padding based on stale marker presence (stale marker is 2 chars: space + ⚠)
     local stale_padding=0
     [[ "$STALE_QUEUE_DEPTH" == "true" ]] && stale_padding=2
     
-    printf "${BOLD_CYAN}${BOX_L_V}${NC} Depth: ${queue_color}${BOLD}%-4s${NC}${stale_marker}" "$queue_depth"
+    # "Waiting:" aligned with first bar, "Running:" aligned with second bar
+    printf "${BOLD_CYAN}${BOX_L_V}${NC} Waiting: ${queue_color}${BOLD}%-4s${NC}${stale_marker}" "$queue_depth"
     printf " ${COLOR_MUTED}|${NC} Target: ${COLOR_INFO}%-2s${NC}" "$THRESHOLD_QUEUE_TARGET"
-    printf " ${COLOR_MUTED}|${NC} Zone: ${zone_color}%s%-10s${NC}" "$zone_icon" "$zone_label"
-    printf "%*s" "$((33 - stale_padding))" ""
+    printf "            Running: ${running_color}${BOLD}%-4s${NC}" "$running_requests"
+    printf " ${COLOR_MUTED}|${NC} Target: ${COLOR_INFO}%-2s${NC}" "5"
+    printf "%*s" "$((13 - stale_padding))" ""
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
-    # Visual queue bar (74 chars + borders + 1 space margin)
-    local bar_width=74
-    local filled=0
+    # Visual bars - two separate bars for Waiting and Running
+    local bar_width_waiting=34
+    local bar_width_running=36
+    local waiting_filled=0
+    local running_filled=0
+    
     if [[ "$queue_depth" =~ ^[0-9]+$ ]] && [[ $queue_depth -gt 0 ]]; then
-        filled=$(( (queue_depth * bar_width) / THRESHOLD_QUEUE_CRITICAL ))
-        [[ $filled -gt $bar_width ]] && filled=$bar_width
+        waiting_filled=$(( (queue_depth * bar_width_waiting) / THRESHOLD_QUEUE_CRITICAL ))
+        [[ $waiting_filled -gt $bar_width_waiting ]] && waiting_filled=$bar_width_waiting
+    fi
+    if [[ "$running_requests" =~ ^[0-9]+$ ]] && [[ $running_requests -gt 0 ]]; then
+        running_filled=$(( (running_requests * bar_width_running) / THRESHOLD_QUEUE_CRITICAL ))
+        [[ $running_filled -gt $bar_width_running ]] && running_filled=$bar_width_running
     fi
     
     printf "${BOLD_CYAN}${BOX_L_V}${NC} ["
-    for ((i=0; i<filled; i++)); do printf "${queue_color}${BLOCK_FULL}${NC}"; done
-    for ((i=filled; i<bar_width; i++)); do printf "${COLOR_MUTED}${BLOCK_LIGHT}${NC}"; done
-    printf "]"
-    printf " "
-    printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
+    for ((i=0; i<waiting_filled; i++)); do printf "${queue_color}${BLOCK_FULL}${NC}"; done
+    for ((i=waiting_filled; i<bar_width_waiting; i++)); do printf "${COLOR_MUTED}${BLOCK_LIGHT}${NC}"; done
+    printf "]  ["
+    for ((i=0; i<running_filled; i++)); do printf "${running_color}${BLOCK_FULL}${NC}"; done
+    for ((i=running_filled; i<bar_width_running; i++)); do printf "${COLOR_MUTED}${BLOCK_LIGHT}${NC}"; done
+    printf "] ${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
     # Section footer
     printf "${BOLD_CYAN}${BOX_L_BL}"
@@ -2340,14 +2347,22 @@ collect_all_metrics() {
         log_error "Failed to collect pod metrics, using last known values"
     fi
     
-    # Process queue depth
-    if [[ -n "$queue_depth" ]] && [[ "$queue_depth" != "N/A" ]]; then
+    # Process queue depth (format: queue_depth|running_requests)
+    if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+\|[0-9]+$ ]]; then
+        METRIC_QUEUE_DEPTH=$(echo "$queue_depth" | cut -d'|' -f1)
+        METRIC_RUNNING_REQUESTS=$(echo "$queue_depth" | cut -d'|' -f2)
+        LAST_GOOD_QUEUE_DEPTH="$METRIC_QUEUE_DEPTH"
+        STALE_QUEUE_DEPTH=false
+    elif [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
+        # Fallback for old format (just queue depth)
         METRIC_QUEUE_DEPTH="$queue_depth"
+        METRIC_RUNNING_REQUESTS=0
         LAST_GOOD_QUEUE_DEPTH="$queue_depth"
         STALE_QUEUE_DEPTH=false
     else
         # Use last known good value and mark as stale
         METRIC_QUEUE_DEPTH="${LAST_GOOD_QUEUE_DEPTH:-N/A}"
+        METRIC_RUNNING_REQUESTS=0
         STALE_QUEUE_DEPTH=true
         log_error "Failed to collect queue depth, using last known value"
     fi
@@ -2405,19 +2420,48 @@ collect_all_metrics() {
         # Update last known good values
         [[ "$METRIC_THROUGHPUT" != "N/A" ]] && LAST_GOOD_THROUGHPUT="$METRIC_THROUGHPUT"
         [[ "$METRIC_TOKENS_PER_SEC" != "N/A" ]] && LAST_GOOD_TOKENS_PER_SEC="$METRIC_TOKENS_PER_SEC"
+        
+        # Update session-persistent values (only when we have valid non-zero data)
+        # These persist even after load test ends so final results screen shows data
+        if [[ "$METRIC_THROUGHPUT" =~ ^[0-9]+$ ]] && [[ "$METRIC_THROUGHPUT" -gt 0 ]]; then
+            SESSION_RPS="$METRIC_THROUGHPUT"
+        fi
+        if [[ "$METRIC_TOKENS_PER_SEC" =~ ^[0-9]+$ ]] && [[ "$METRIC_TOKENS_PER_SEC" -gt 0 ]]; then
+            SESSION_TOKENS_SEC="$METRIC_TOKENS_PER_SEC"
+        fi
+        if [[ "$METRIC_TTFT_P50" =~ ^[0-9]+$ ]] && [[ "$METRIC_TTFT_P50" -gt 0 ]]; then
+            SESSION_TTFT_P50="$METRIC_TTFT_P50"
+        fi
+        if [[ "$METRIC_TTFT_P95" =~ ^[0-9]+$ ]] && [[ "$METRIC_TTFT_P95" -gt 0 ]]; then
+            SESSION_TTFT_P95="$METRIC_TTFT_P95"
+        fi
+        if [[ "$METRIC_E2E_AVG" =~ ^[0-9]+$ ]] && [[ "$METRIC_E2E_AVG" -gt 0 ]]; then
+            SESSION_E2E_AVG="$METRIC_E2E_AVG"
+        fi
+        if [[ "$METRIC_E2E_P50" =~ ^[0-9]+$ ]] && [[ "$METRIC_E2E_P50" -gt 0 ]]; then
+            SESSION_E2E_P50="$METRIC_E2E_P50"
+        fi
+        if [[ "$METRIC_E2E_P95" =~ ^[0-9]+$ ]] && [[ "$METRIC_E2E_P95" -gt 0 ]]; then
+            SESSION_E2E_P95="$METRIC_E2E_P95"
+        fi
+        if [[ "$METRIC_TOKENS_PER_REQ" =~ ^[0-9]+$ ]] && [[ "$METRIC_TOKENS_PER_REQ" -gt 0 ]]; then
+            SESSION_TOKENS_REQ="$METRIC_TOKENS_PER_REQ"
+        fi
+        
         STALE_PERFORMANCE=false
     else
-        # Use last known good values and mark as stale
-        METRIC_THROUGHPUT="${LAST_GOOD_THROUGHPUT:-N/A}"
-        METRIC_TOKENS_PER_SEC="${LAST_GOOD_TOKENS_PER_SEC:-N/A}"
-        METRIC_TTFT_P50="N/A"
-        METRIC_TTFT_P95="N/A"
-        METRIC_E2E_AVG="N/A"
-        METRIC_E2E_P50="N/A"
-        METRIC_E2E_P95="N/A"
-        METRIC_TOKENS_PER_REQ="N/A"
+        # Use session-persistent values when current metrics are unavailable
+        # This ensures final results screen shows data after load test ends
+        METRIC_THROUGHPUT="${SESSION_RPS:-${LAST_GOOD_THROUGHPUT:-N/A}}"
+        METRIC_TOKENS_PER_SEC="${SESSION_TOKENS_SEC:-${LAST_GOOD_TOKENS_PER_SEC:-N/A}}"
+        METRIC_TTFT_P50="${SESSION_TTFT_P50:-N/A}"
+        METRIC_TTFT_P95="${SESSION_TTFT_P95:-N/A}"
+        METRIC_E2E_AVG="${SESSION_E2E_AVG:-N/A}"
+        METRIC_E2E_P50="${SESSION_E2E_P50:-N/A}"
+        METRIC_E2E_P95="${SESSION_E2E_P95:-N/A}"
+        METRIC_TOKENS_PER_REQ="${SESSION_TOKENS_REQ:-N/A}"
         STALE_PERFORMANCE=true
-        log_error "Failed to collect performance metrics, using last known values"
+        log_error "Failed to collect performance metrics, using session-persistent values"
     fi
     
     # Update current RPS from throughput (no fallback - keep it consistent)
@@ -2529,12 +2573,21 @@ collect_all_metrics_async() {
             echo "STALE_PODS=true"
         fi
         
-        # Process queue depth
-        if [[ -n "$queue_depth" ]] && [[ "$queue_depth" != "N/A" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
+        # Process queue depth (format: queue_depth|running_requests)
+        if [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+\|[0-9]+$ ]]; then
+            local qd=$(echo "$queue_depth" | cut -d'|' -f1)
+            local rr=$(echo "$queue_depth" | cut -d'|' -f2)
+            echo "METRIC_QUEUE_DEPTH='$qd'"
+            echo "METRIC_RUNNING_REQUESTS='$rr'"
+            echo "LAST_GOOD_QUEUE_DEPTH='$qd'"
+            echo "STALE_QUEUE_DEPTH=false"
+        elif [[ -n "$queue_depth" ]] && [[ "$queue_depth" =~ ^[0-9]+$ ]]; then
             echo "METRIC_QUEUE_DEPTH='$queue_depth'"
+            echo "METRIC_RUNNING_REQUESTS='0'"
             echo "LAST_GOOD_QUEUE_DEPTH='$queue_depth'"
             echo "STALE_QUEUE_DEPTH=false"
         else
+            echo "METRIC_RUNNING_REQUESTS='0'"
             echo "STALE_QUEUE_DEPTH=true"
         fi
         
@@ -2587,16 +2640,30 @@ collect_all_metrics_async() {
             local throughput=$(echo "$perf_metrics" | cut -d'|' -f1)
             local tokens_per_sec=$(echo "$perf_metrics" | cut -d'|' -f9)
             local tokens_per_req=$(echo "$perf_metrics" | cut -d'|' -f7)
+            local ttft_p50=$(echo "$perf_metrics" | cut -d'|' -f2)
+            local ttft_p95=$(echo "$perf_metrics" | cut -d'|' -f3)
+            local e2e_avg=$(echo "$perf_metrics" | cut -d'|' -f4)
+            local e2e_p50=$(echo "$perf_metrics" | cut -d'|' -f5)
+            local e2e_p95=$(echo "$perf_metrics" | cut -d'|' -f6)
             echo "METRIC_THROUGHPUT='$throughput'"
             echo "METRIC_TOKENS_PER_SEC='$tokens_per_sec'"
             echo "METRIC_TOKENS_PER_REQ='$tokens_per_req'"
-            echo "METRIC_TTFT_P50='$(echo "$perf_metrics" | cut -d'|' -f2)'"
-            echo "METRIC_TTFT_P95='$(echo "$perf_metrics" | cut -d'|' -f3)'"
-            echo "METRIC_E2E_AVG='$(echo "$perf_metrics" | cut -d'|' -f4)'"
-            echo "METRIC_E2E_P50='$(echo "$perf_metrics" | cut -d'|' -f5)'"
-            echo "METRIC_E2E_P95='$(echo "$perf_metrics" | cut -d'|' -f6)'"
+            echo "METRIC_TTFT_P50='$ttft_p50'"
+            echo "METRIC_TTFT_P95='$ttft_p95'"
+            echo "METRIC_E2E_AVG='$e2e_avg'"
+            echo "METRIC_E2E_P50='$e2e_p50'"
+            echo "METRIC_E2E_P95='$e2e_p95'"
             [[ "$throughput" != "N/A" ]] && echo "LAST_GOOD_THROUGHPUT='$throughput'"
             [[ "$tokens_per_sec" != "N/A" ]] && echo "LAST_GOOD_TOKENS_PER_SEC='$tokens_per_sec'"
+            # Update session-persistent values (only when we have valid non-zero data)
+            [[ "$throughput" =~ ^[0-9]+$ ]] && [[ "$throughput" -gt 0 ]] && echo "SESSION_RPS='$throughput'"
+            [[ "$tokens_per_sec" =~ ^[0-9]+$ ]] && [[ "$tokens_per_sec" -gt 0 ]] && echo "SESSION_TOKENS_SEC='$tokens_per_sec'"
+            [[ "$ttft_p50" =~ ^[0-9]+$ ]] && [[ "$ttft_p50" -gt 0 ]] && echo "SESSION_TTFT_P50='$ttft_p50'"
+            [[ "$ttft_p95" =~ ^[0-9]+$ ]] && [[ "$ttft_p95" -gt 0 ]] && echo "SESSION_TTFT_P95='$ttft_p95'"
+            [[ "$e2e_avg" =~ ^[0-9]+$ ]] && [[ "$e2e_avg" -gt 0 ]] && echo "SESSION_E2E_AVG='$e2e_avg'"
+            [[ "$e2e_p50" =~ ^[0-9]+$ ]] && [[ "$e2e_p50" -gt 0 ]] && echo "SESSION_E2E_P50='$e2e_p50'"
+            [[ "$e2e_p95" =~ ^[0-9]+$ ]] && [[ "$e2e_p95" -gt 0 ]] && echo "SESSION_E2E_P95='$e2e_p95'"
+            [[ "$tokens_per_req" =~ ^[0-9]+$ ]] && [[ "$tokens_per_req" -gt 0 ]] && echo "SESSION_TOKENS_REQ='$tokens_per_req'"
             echo "STALE_PERFORMANCE=false"
             # Use throughput directly for graph RPS (no fallback to queue_depth)
             if [[ "$throughput" =~ ^[0-9]+$ ]]; then
@@ -2605,6 +2672,15 @@ collect_all_metrics_async() {
                 echo "METRIC_CURRENT_RPS='0'"
             fi
         else
+            # Use session-persistent values when current metrics are unavailable
+            echo "METRIC_THROUGHPUT='\${SESSION_RPS:-\${LAST_GOOD_THROUGHPUT:-N/A}}'"
+            echo "METRIC_TOKENS_PER_SEC='\${SESSION_TOKENS_SEC:-\${LAST_GOOD_TOKENS_PER_SEC:-N/A}}'"
+            echo "METRIC_TTFT_P50='\${SESSION_TTFT_P50:-N/A}'"
+            echo "METRIC_TTFT_P95='\${SESSION_TTFT_P95:-N/A}'"
+            echo "METRIC_E2E_AVG='\${SESSION_E2E_AVG:-N/A}'"
+            echo "METRIC_E2E_P50='\${SESSION_E2E_P50:-N/A}'"
+            echo "METRIC_E2E_P95='\${SESSION_E2E_P95:-N/A}'"
+            echo "METRIC_TOKENS_PER_REQ='\${SESSION_TOKENS_REQ:-N/A}'"
             echo "STALE_PERFORMANCE=true"
             echo "METRIC_CURRENT_RPS='0'"
         fi
@@ -2654,6 +2730,9 @@ render_dashboard() {
 #   - Logs shutdown event
 # -----------------------------------------------------------------------------
 cleanup() {
+    # Prevent recursive cleanup calls
+    trap - EXIT
+    
     # Stop port-forward if running
     stop_port_forward
     

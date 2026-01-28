@@ -208,6 +208,35 @@ This plan implements a terminal-based real-time dashboard for monitoring Kuberne
   - Verify scaling indicators work during load test
   - Ensure all tests pass, ask the user if questions arise.
 
+- [x] 11. Implement performance metrics persistence
+  - [x] 11.1 Add session-persistent performance metric variables
+    - Add `SESSION_RPS`, `SESSION_TOKENS_SEC` variables initialized to empty
+    - Add `SESSION_TTFT_P50`, `SESSION_TTFT_P95` variables initialized to empty
+    - Add `SESSION_E2E_AVG`, `SESSION_E2E_P50`, `SESSION_E2E_P95` variables initialized to empty
+    - Add `SESSION_TOKENS_REQ` variable initialized to empty
+    - Variables should only reset when dashboard restarts
+    - _Requirements: 9.1-9.5, 9.7, 9.8_
+
+  - [x] 11.2 Update `get_performance_metrics` to persist last good values
+    - When RPS is valid (non-zero, non-N/A), update `SESSION_RPS`
+    - When Tok/Sec is valid, update `SESSION_TOKENS_SEC`
+    - When TTFT values are valid, update `SESSION_TTFT_P50`, `SESSION_TTFT_P95`
+    - When E2E values are valid, update `SESSION_E2E_AVG`, `SESSION_E2E_P50`, `SESSION_E2E_P95`
+    - When Tok/Req is valid, update `SESSION_TOKENS_REQ`
+    - _Requirements: 9.1-9.5_
+
+  - [x] 11.3 Update `render_performance_section` to use persisted values
+    - Display `SESSION_*` values when current values are zero or N/A
+    - Ensure display fits within 80-column constraint per steering rules
+    - Run `bats scripts/tests/demo-dashboard.bats` to verify alignment
+    - _Requirements: 9.6, 9.7_
+
+  - [ ]* 11.4 Write property test for performance metrics persistence
+    - **Property 9: Performance metrics persistence**
+    - Generate sequences with valid values followed by zeros/N/A
+    - Verify session variables retain last good values
+    - **Validates: Requirements 9.1-9.8**
+
 ## Notes
 
 - All property-based tests are required for comprehensive coverage

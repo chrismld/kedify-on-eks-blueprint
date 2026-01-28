@@ -627,7 +627,7 @@ restore_kubectl() {
     done
 }
 
-@test "Property 5: Graceful degradation - get_queue_depth returns 0 on failure" {
+@test "Property 5: Graceful degradation - get_queue_depth returns 0|0 on failure" {
     # Run 5 iterations with mocked kubectl failures
     for iteration in $(seq 1 5); do
         # Mock kubectl to fail
@@ -635,9 +635,9 @@ restore_kubectl() {
         
         local result=$(get_queue_depth)
         
-        # Verify result is 0 (default when no metrics available)
-        if [[ "$result" != "0" ]]; then
-            echo "FAILED iteration $iteration: get_queue_depth should return '0' on failure, got '$result'"
+        # Verify result is 0|0 (default when no metrics available - queue_depth|running_requests)
+        if [[ "$result" != "0|0" ]]; then
+            echo "FAILED iteration $iteration: get_queue_depth should return '0|0' on failure, got '$result'"
             return 1
         fi
         

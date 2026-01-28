@@ -110,3 +110,18 @@ A terminal-based real-time dashboard for monitoring Kubernetes autoscaling demos
 2. IF the Kubernetes cluster is unreachable, THEN THE Dashboard SHALL display an error message and retry
 3. THE Dashboard SHALL continue running even if individual metric collections fail
 4. THE Dashboard SHALL log errors to a file without disrupting the display
+
+### Requirement 9: Performance Metrics Persistence
+
+**User Story:** As a demo presenter, I want all performance metrics to persist their values after the load test completes, so that I can show the final results screen with meaningful data instead of N/A values.
+
+#### Acceptance Criteria
+
+1. THE Dashboard SHALL persist the last non-zero/non-N/A value for RPS during the session
+2. THE Dashboard SHALL persist the last non-zero/non-N/A value for Tok/Sec during the session
+3. THE Dashboard SHALL persist the last non-zero/non-N/A value for TTFT p50 and p95 during the session
+4. THE Dashboard SHALL persist the last non-zero/non-N/A value for E2E Avg, p50, and p95 during the session
+5. THE Dashboard SHALL persist the last non-zero/non-N/A value for Tok/Req during the session
+6. WHEN the load test completes and traffic drops to zero, THE Dashboard SHALL continue displaying the persisted performance values
+7. THE persisted values SHALL only reset when the dashboard is restarted, not when metrics temporarily become unavailable or zero
+8. THE Dashboard SHALL use session-persistent variables (similar to pod startup times) for all performance metrics
