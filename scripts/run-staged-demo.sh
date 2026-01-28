@@ -5,11 +5,23 @@
 # =============================================================================
 # Deploys and runs a staged k6 load test on EKS to showcase KEDA + Karpenter
 #
+# This test accounts for ~5 minute GPU node startup time:
+#
+# Phase 1 (0-30s):    Light load (10 VUs) - trigger initial scale-up
+# Phase 2 (30s-5m):   Steady light load (10 VUs) - wait for first nodes
+# Phase 3 (5m-6m):    Ramp to medium (30 VUs) - trigger more scaling
+# Phase 4 (6m-10m):   Hold medium load - wait for all nodes ready
+# Phase 5 (10m-12m):  Ramp to high load (80 VUs) - full capacity test
+# Phase 6 (12m-15m):  Sustained high load - demonstrate scaled system
+# Phase 7 (15m-16m):  Ramp down
+#
+# Total duration: ~16 minutes (can extend with --extended or --full)
+#
 # Usage: ./run-staged-demo.sh [options]
 #
 # Options:
-#   --extended      Run extended Stage 3 (10 minutes instead of 2)
-#   --full          Run full demo (20 minutes sustained load)
+#   --extended      Run extended high load phase (10 minutes instead of 3)
+#   --full          Run full demo (20 minutes sustained high load)
 #   --delete        Delete existing job before starting
 #   --logs          Follow the k6 job logs
 # =============================================================================
@@ -53,26 +65,27 @@ done
 echo "╔════════════════════════════════════════════════════════════════════════════╗"
 echo "║              Staged Demo Load Test for vLLM Autoscaling (EKS)              ║"
 echo "╠════════════════════════════════════════════════════════════════════════════╣"
-echo "║ This test demonstrates KEDA + Karpenter scaling in 3 stages:               ║"
+echo "║ This test accounts for ~5 min GPU node startup time:                       ║"
 echo "║                                                                            ║"
-echo "║ Stage 1 (0-1m):   Light load → triggers first scale-up (1→2 pods)          ║"
-echo "║ Wait (1-6m):      Karpenter provisions first GPU node (~4-5 min)           ║"
-echo "║ Stage 2 (6-7m):   Medium load → triggers aggressive scale-up (2→10 pods)   ║"
-echo "║ Wait (7-12m):     Karpenter provisions remaining nodes (~4-5 min)          ║"
-echo "║ Stage 3 (12-14m): Full sustained load                                      ║"
+echo "║ Phase 1 (0-30s):   Light load (10 VUs) → trigger initial scale-up          ║"
+echo "║ Phase 2 (30s-5m):  Hold light load → wait for first GPU nodes              ║"
+echo "║ Phase 3 (5m-6m):   Ramp to medium (30 VUs) → trigger more scaling          ║"
+echo "║ Phase 4 (6m-10m):  Hold medium load → wait for all nodes ready             ║"
+echo "║ Phase 5 (10m-12m): Ramp to high (80 VUs) → full capacity test              ║"
+echo "║ Phase 6 (12m+):    Sustained high load → demonstrate scaled system         ║"
 echo "╚════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 
 # Determine mode and duration
 if [[ "$FULL" == "true" ]]; then
-    echo "Mode: FULL (20 min sustained load, ~32 min total)"
-    STAGE3_DURATION="20m"
+    echo "Mode: FULL (20 min sustained high load, ~32 min total)"
+    HIGH_LOAD_DURATION="20m"
 elif [[ "$EXTENDED" == "true" ]]; then
-    echo "Mode: EXTENDED (10 min sustained load, ~22 min total)"
-    STAGE3_DURATION="10m"
+    echo "Mode: EXTENDED (10 min sustained high load, ~22 min total)"
+    HIGH_LOAD_DURATION="10m"
 else
-    echo "Mode: STANDARD (2 min sustained load, ~14 min total)"
-    STAGE3_DURATION="2m"
+    echo "Mode: STANDARD (3 min sustained high load, ~16 min total)"
+    HIGH_LOAD_DURATION="3m"
 fi
 echo ""
 
@@ -104,7 +117,7 @@ if kubectl get job k6-staged-demo &>/dev/null; then
     fi
 fi
 
-# Create ConfigMap with the appropriate stage 3 duration
+# Create ConfigMap with the appropriate high load duration
 echo "Creating k6 test ConfigMap..."
 
 # Generate the ConfigMap with the correct duration
@@ -119,28 +132,34 @@ data:
     import http from 'k6/http';
     import { check, sleep } from 'k6';
 
+    // Staged Demo - accounts for ~5 min GPU node startup time
     export const options = {
       scenarios: {
         staged_demo: {
           executor: 'ramping-vus',
-          startVUs: 0,
+          startVUs: 5,
           stages: [
-            { duration: '30s', target: 5 },
-            { duration: '30s', target: 5 },
-            { duration: '5m', target: 2 },
+            // Phase 1: Light load to trigger initial scaling
+            { duration: '30s', target: 10 },
+            // Phase 2: Hold light load while first GPU nodes provision (~5 min)
+            { duration: '4m30s', target: 10 },
+            // Phase 3: Ramp to medium load to trigger more scaling
             { duration: '30s', target: 30 },
-            { duration: '30s', target: 30 },
-            { duration: '5m', target: 5 },
-            { duration: '30s', target: 50 },
-            { duration: '${STAGE3_DURATION}', target: 50 },
-            { duration: '30s', target: 0 },
+            // Phase 4: Hold medium load while remaining nodes provision (~4 min)
+            { duration: '4m', target: 30 },
+            // Phase 5: Ramp to high load - all pods should be ready
+            { duration: '1m', target: 80 },
+            // Phase 6: Sustained high load - demonstrate full capacity
+            { duration: '${HIGH_LOAD_DURATION}', target: 80 },
+            // Phase 7: Ramp down
+            { duration: '1m', target: 0 },
           ],
           gracefulRampDown: '30s',
         },
       },
       thresholds: {
-        http_req_duration: ['p(95)<30000'],
-        http_req_failed: ['rate<0.3'],
+        http_req_duration: ['p(95)<20000'],  // 95% under 20s (allow for cold starts)
+        http_req_failed: ['rate<0.15'],      // Allow 15% failures during scaling
       },
     };
 
@@ -168,7 +187,7 @@ data:
 
       const params = {
         headers: { 'Content-Type': 'application/json' },
-        timeout: '60s',
+        timeout: '45s',
       };
 
       const res = http.post(url, payload, params);
@@ -185,7 +204,8 @@ data:
         },
       });
 
-      sleep(0.5 + Math.random() * 0.5);
+      // Small sleep to control request rate per VU
+      sleep(0.2 + Math.random() * 0.3);
     }
 EOFYAML
 
@@ -201,7 +221,7 @@ metadata:
   namespace: default
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 300
+  ttlSecondsAfterFinished: 600
   template:
     spec:
       restartPolicy: Never

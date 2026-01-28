@@ -95,9 +95,10 @@ GPU_NODE_LABEL="workload=inference"  # Alternative label for GPU nodes
 # -----------------------------------------------------------------------------
 
 # KEDA scaling thresholds
-THRESHOLD_QUEUE_TARGET=1              # KEDA target value (triggers scaling)
-THRESHOLD_QUEUE_SCALE_UP=5            # Queue depth indicating scale-up pressure
+THRESHOLD_QUEUE_TARGET=5              # KEDA target value for waiting requests
+THRESHOLD_QUEUE_SCALE_UP=10           # Queue depth indicating scale-up pressure
 THRESHOLD_QUEUE_HIGH=20               # High queue depth (warning)
+THRESHOLD_RUNNING_TARGET=25           # KEDA target value for running requests
 THRESHOLD_QUEUE_CRITICAL=50           # Critical queue depth (error)
 
 # Response time thresholds (milliseconds)
@@ -193,6 +194,19 @@ STALE_QUEUE_DEPTH=false
 STALE_PODS=false
 STALE_NODES=false
 STALE_PERFORMANCE=false
+
+# k6 Load Test Results (populated when k6 job completes)
+K6_JOB_STATUS=""           # "running", "completed", "failed", ""
+K6_TOTAL_REQUESTS=""       # Total HTTP requests made
+K6_RPS=""                  # Requests per second (final)
+K6_AVG_DURATION=""         # Average request duration
+K6_MIN_DURATION=""         # Min request duration
+K6_MED_DURATION=""         # Median request duration
+K6_MAX_DURATION=""         # Max request duration
+K6_P90_DURATION=""         # P90 request duration
+K6_P95_DURATION=""         # P95 request duration
+K6_FAILURE_RATE=""         # Failure rate percentage
+K6_LAST_CHECK=0            # Timestamp of last k6 status check
 
 # -----------------------------------------------------------------------------
 # Display Configuration
@@ -675,6 +689,37 @@ determine_status_color() {
             echo "$COLOR_INFO"
             ;;
     esac
+}
+
+# -----------------------------------------------------------------------------
+# determine_target_color - Color based on value relative to KEDA target
+# Requirements: 7.4 (consistent colors for proactive scaling visualization)
+# Parameters:
+#   $1 - Current value
+#   $2 - Target value (KEDA scaling target)
+# Returns: ANSI color code string
+# Logic: GREEN=below target, YELLOW=at/above target, RED=50%+ above target
+# -----------------------------------------------------------------------------
+determine_target_color() {
+    local value="$1"
+    local target="$2"
+    
+    # Handle N/A or non-numeric values
+    if [[ "$value" == "N/A" ]] || [[ -z "$value" ]] || ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$COLOR_INFO"
+        return 0
+    fi
+    
+    # Calculate threshold for red (50% above target)
+    local red_threshold=$(( (target * 3) / 2 ))
+    
+    if [[ $value -ge $red_threshold ]]; then
+        echo "$COLOR_ERROR"
+    elif [[ $value -ge $target ]]; then
+        echo "$COLOR_WARNING"
+    else
+        echo "$COLOR_GOOD"
+    fi
 }
 
 # =============================================================================
@@ -1505,6 +1550,96 @@ get_performance_metrics() {
     return 0
 }
 
+# -----------------------------------------------------------------------------
+# check_k6_job_status - Check k6 load test job status and extract results
+# Requirements: Monitor k6 job completion and parse final results
+# Side effects:
+#   - Updates K6_JOB_STATUS, K6_TOTAL_REQUESTS, K6_RPS, etc.
+#   - Only checks every 10 seconds to avoid kubectl spam
+# Returns: 0 on success
+# -----------------------------------------------------------------------------
+check_k6_job_status() {
+    local current_time=$(date +%s)
+    
+    # Only check every 10 seconds to reduce kubectl calls
+    if [[ $((current_time - K6_LAST_CHECK)) -lt 10 ]]; then
+        return 0
+    fi
+    K6_LAST_CHECK=$current_time
+    
+    # Check if k6 job exists
+    local job_status
+    job_status=$(kubectl get job k6-load-test -n default -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null)
+    local job_failed
+    job_failed=$(kubectl get job k6-load-test -n default -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null)
+    
+    if [[ "$job_status" == "True" ]]; then
+        # Job completed - extract results from logs if not already done
+        if [[ "$K6_JOB_STATUS" != "completed" ]]; then
+            K6_JOB_STATUS="completed"
+            parse_k6_results
+        fi
+    elif [[ "$job_failed" == "True" ]]; then
+        K6_JOB_STATUS="failed"
+    elif kubectl get job k6-load-test -n default &>/dev/null; then
+        K6_JOB_STATUS="running"
+    else
+        K6_JOB_STATUS=""
+    fi
+    
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# parse_k6_results - Parse k6 job logs to extract final test results
+# Requirements: Extract http_reqs, http_req_duration, http_req_failed from k6 output
+# Side effects:
+#   - Updates K6_TOTAL_REQUESTS, K6_RPS, K6_AVG_DURATION, K6_MIN_DURATION, K6_MED_DURATION,
+#     K6_MAX_DURATION, K6_P90_DURATION, K6_P95_DURATION, K6_FAILURE_RATE
+# -----------------------------------------------------------------------------
+parse_k6_results() {
+    local logs
+    logs=$(kubectl logs job/k6-load-test -n default 2>/dev/null | tail -100)
+    
+    if [[ -z "$logs" ]]; then
+        log_warning "Could not retrieve k6 job logs"
+        return 1
+    fi
+    
+    # Extract http_reqs line: http_reqs......................: 17630  36.71276/s
+    local reqs_line
+    reqs_line=$(echo "$logs" | grep -E "http_reqs\.+:" | head -1)
+    if [[ -n "$reqs_line" ]]; then
+        # Extract total requests (first number)
+        K6_TOTAL_REQUESTS=$(echo "$reqs_line" | awk '{print $2}')
+        # Extract RPS (number before /s)
+        K6_RPS=$(echo "$reqs_line" | grep -oE '[0-9]+\.[0-9]+/s' | sed 's|/s||')
+    fi
+    
+    # Extract http_req_duration line: avg=735.24ms min=355.83ms med=673.23ms max=1.18s p(90)=1s p(95)=1.04s
+    local duration_line
+    duration_line=$(echo "$logs" | grep -E "http_req_duration\.+:" | head -1)
+    if [[ -n "$duration_line" ]]; then
+        # Extract all duration metrics
+        K6_AVG_DURATION=$(echo "$duration_line" | grep -oE 'avg=[0-9.]+[ms]*' | sed 's/avg=//')
+        K6_MIN_DURATION=$(echo "$duration_line" | grep -oE 'min=[0-9.]+[ms]*' | sed 's/min=//')
+        K6_MED_DURATION=$(echo "$duration_line" | grep -oE 'med=[0-9.]+[ms]*' | sed 's/med=//')
+        K6_MAX_DURATION=$(echo "$duration_line" | grep -oE 'max=[0-9.]+[ms]*' | sed 's/max=//')
+        K6_P90_DURATION=$(echo "$duration_line" | grep -oE 'p\(90\)=[0-9.]+[ms]*' | sed 's/p(90)=//')
+        K6_P95_DURATION=$(echo "$duration_line" | grep -oE 'p\(95\)=[0-9.]+[ms]*' | sed 's/p(95)=//')
+    fi
+    
+    # Extract http_req_failed line: http_req_failed................: 0.00%  0 out of 17630
+    local failed_line
+    failed_line=$(echo "$logs" | grep -E "http_req_failed\.+:" | head -1)
+    if [[ -n "$failed_line" ]]; then
+        K6_FAILURE_RATE=$(echo "$failed_line" | grep -oE '[0-9.]+%' | head -1)
+    fi
+    
+    log_info "k6 results parsed: reqs=$K6_TOTAL_REQUESTS, rps=$K6_RPS, avg=$K6_AVG_DURATION, min=$K6_MIN_DURATION, med=$K6_MED_DURATION, max=$K6_MAX_DURATION, p90=$K6_P90_DURATION, p95=$K6_P95_DURATION, failed=$K6_FAILURE_RATE"
+    return 0
+}
+
 # =============================================================================
 # DISPLAY RENDERER FUNCTIONS
 # =============================================================================
@@ -1637,12 +1772,15 @@ render_load_section() {
 render_queue_section() {
     local queue_depth="${METRIC_QUEUE_DEPTH:-0}"
     local running_requests="${METRIC_RUNNING_REQUESTS:-0}"
-    local queue_color
-    queue_color=$(determine_status_color "queue" "$queue_depth")
     
-    # Color for running requests (similar logic to queue)
+    # Color based on value relative to KEDA target (proactive scaling visualization)
+    # GREEN=below target, YELLOW=at/above target, RED=50%+ above target
+    local queue_color
+    queue_color=$(determine_target_color "$queue_depth" "$THRESHOLD_QUEUE_TARGET")
+    
+    # Color for running requests using same target-relative logic
     local running_color
-    running_color=$(determine_status_color "queue" "$running_requests")
+    running_color=$(determine_target_color "$running_requests" "$THRESHOLD_RUNNING_TARGET")
     
     # Add stale indicator if needed
     local stale_marker=""
@@ -1664,7 +1802,7 @@ render_queue_section() {
     printf "${BOLD_CYAN}${BOX_L_V}${NC} Waiting: ${queue_color}${BOLD}%-4s${NC}${stale_marker}" "$queue_depth"
     printf " ${COLOR_MUTED}|${NC} Target: ${COLOR_INFO}%-2s${NC}" "$THRESHOLD_QUEUE_TARGET"
     printf "            Running: ${running_color}${BOLD}%-4s${NC}" "$running_requests"
-    printf " ${COLOR_MUTED}|${NC} Target: ${COLOR_INFO}%-2s${NC}" "5"
+    printf " ${COLOR_MUTED}|${NC} Target: ${COLOR_INFO}%-2s${NC}" "$THRESHOLD_RUNNING_TARGET"
     printf "%*s" "$((13 - stale_padding))" ""
     printf "${BOLD_CYAN}${BOX_L_V}${NC}\n"
     
@@ -2136,6 +2274,40 @@ render_insights_section() {
     local insights=()
     local insight_colors=()
     
+    # Check k6 job status first - prioritize showing test results
+    check_k6_job_status
+    
+    # If k6 job completed, show results as top priority (use all 3 insight lines)
+    if [[ "$K6_JOB_STATUS" == "completed" ]] && [[ -n "$K6_TOTAL_REQUESTS" ]]; then
+        # Truncate RPS to 1 decimal place if it has more
+        local rps_short="${K6_RPS}"
+        if [[ "$rps_short" =~ ^([0-9]+\.[0-9]) ]]; then
+            rps_short="${BASH_REMATCH[1]}"
+        fi
+        
+        # Line 1: Throughput - "Load Test: 28398 reqs @ 32.6 RPS, 0.00% failed"
+        local line1="Load Test: ${K6_TOTAL_REQUESTS} reqs @ ${rps_short} RPS"
+        [[ -n "$K6_FAILURE_RATE" ]] && line1+=", ${K6_FAILURE_RATE} failed"
+        insights+=("$line1")
+        insight_colors+=("$COLOR_GOOD")
+        
+        # Line 2: Latency range - "  Latency: avg=735ms, min=355ms, max=1.18s"
+        local line2="  Latency: avg=${K6_AVG_DURATION}, min=${K6_MIN_DURATION}, max=${K6_MAX_DURATION}"
+        insights+=("$line2")
+        insight_colors+=("$COLOR_INFO")
+        
+        # Line 3: Percentiles - "  Percentiles: med=673ms, p90=1s, p95=1.04s"
+        local line3="  Percentiles: med=${K6_MED_DURATION}, p90=${K6_P90_DURATION}, p95=${K6_P95_DURATION}"
+        insights+=("$line3")
+        insight_colors+=("$COLOR_INFO")
+    elif [[ "$K6_JOB_STATUS" == "running" ]]; then
+        insights+=("Load test running...")
+        insight_colors+=("$COLOR_INFO")
+    elif [[ "$K6_JOB_STATUS" == "failed" ]]; then
+        insights+=("Load test failed - check k6 logs")
+        insight_colors+=("$COLOR_ERROR")
+    fi
+    
     # Analyze queue depth
     if [[ "$METRIC_QUEUE_DEPTH" =~ ^[0-9]+$ ]]; then
         if [[ $METRIC_QUEUE_DEPTH -ge $THRESHOLD_QUEUE_CRITICAL ]]; then
@@ -2144,7 +2316,7 @@ render_insights_section() {
         elif [[ $METRIC_QUEUE_DEPTH -ge $THRESHOLD_QUEUE_HIGH ]]; then
             insights+=("Queue high - scaling in progress")
             insight_colors+=("$COLOR_WARNING")
-        elif [[ $METRIC_QUEUE_DEPTH -eq 0 ]]; then
+        elif [[ $METRIC_QUEUE_DEPTH -eq 0 ]] && [[ "$K6_JOB_STATUS" != "completed" ]]; then
             insights+=("Queue empty - system idle")
             insight_colors+=("$COLOR_INFO")
         fi
@@ -2159,7 +2331,7 @@ render_insights_section() {
         elif [[ $METRIC_PODS_DESIRED -lt $METRIC_PODS_RUNNING ]]; then
             insights+=("Scaling down in progress")
             insight_colors+=("$COLOR_INFO")
-        elif [[ $METRIC_PODS_RUNNING -gt 0 ]]; then
+        elif [[ $METRIC_PODS_RUNNING -gt 0 ]] && [[ "$K6_JOB_STATUS" != "completed" ]]; then
             insights+=("Pods stable at $METRIC_PODS_RUNNING replica(s)")
             insight_colors+=("$COLOR_GOOD")
         fi
@@ -2170,7 +2342,7 @@ render_insights_section() {
         if [[ $METRIC_NODES_COUNT -eq 0 ]]; then
             insights+=("No GPU nodes - Karpenter may provision")
             insight_colors+=("$COLOR_WARNING")
-        elif [[ $METRIC_NODES_COUNT -ge 3 ]]; then
+        elif [[ $METRIC_NODES_COUNT -ge 3 ]] && [[ "$K6_JOB_STATUS" != "completed" ]]; then
             insights+=("$METRIC_NODES_COUNT GPU nodes active")
             insight_colors+=("$COLOR_GOOD")
         fi

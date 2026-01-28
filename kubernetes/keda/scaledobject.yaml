@@ -16,7 +16,7 @@ spec:
     metadata:
       scalerAddress: 'kedify-otel-scaler.keda.svc:4318'
       metricQuery: 'sum(vllm_num_requests_running)'
-      targetValue: '5'        # Scale when 5 running requests (very aggressive)
+      targetValue: '25'       # Each pod handles ~32 concurrent, target 25 for headroom
       clampMin: '0'
       clampMax: '500'
       operationOverTime: 'last_one'
@@ -25,15 +25,17 @@ spec:
     metadata:
       scalerAddress: 'kedify-otel-scaler.keda.svc:4318'
       metricQuery: 'sum(vllm_num_requests_waiting)'
-      targetValue: '1'        # Scale when 1+ requests waiting
+      targetValue: '5'        # Scale when 5+ requests waiting (queue building)
       clampMin: '0'
       clampMax: '500'
       operationOverTime: 'last_one'
   advanced:
     scalingModifiers:
-      formula: "running + (waiting * 5)"  # Weight waiting requests 5x (very aggressive)
-      target: "5"             # Lower target = faster scaling decision
-      activationTarget: "1"   # Activate scaling immediately when load > 1
+      # Formula: running requests + (waiting * 10) to heavily weight queue buildup
+      # This triggers scaling proactively when queue starts building
+      formula: "running + (waiting * 10)"
+      target: "25"            # Target per pod (matches running targetValue)
+      activationTarget: "5"   # Activate scaling when combined metric > 5
     horizontalPodAutoscalerConfig:
       behavior:
         scaleDown:
@@ -46,9 +48,9 @@ spec:
           stabilizationWindowSeconds: 0   # No stabilization delay
           policies:
           - type: Percent
-            value: 500        # Allow 500% increase per period
-            periodSeconds: 10 # Every 10 seconds
+            value: 900        # Allow 900% increase per period (1→10 pods)
+            periodSeconds: 15 # Every 15 seconds
           - type: Pods
-            value: 8          # Or add up to 8 pods per period
-            periodSeconds: 10
+            value: 9          # Or add up to 9 pods per period (1→10)
+            periodSeconds: 15
           selectPolicy: Max
